@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Head Table Dashboard</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6fb;
+      --bg-accent: #eef3ff;
+      --surface: #ffffff;
+      --surface-subtle: #f8fafc;
+      --line: #d9e0ea;
+      --line-strong: #c6cfdb;
+      --text: #16202f;
+      --text-soft: #556070;
+      --text-faint: #738095;
+      --shadow: 0 12px 32px rgba(24, 39, 75, 0.08);
+      --shadow-soft: 0 6px 16px rgba(24, 39, 75, 0.05);
+      --radius: 14px;
+      --radius-sm: 10px;
+      --accent: #2d66c3;
+      --good: #0a7c00;
+      --warn: #aa6a00;
+      --danger: #b10000;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--bg); }
+    body {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(45, 102, 195, 0.08), transparent 34%),
+        linear-gradient(180deg, var(--bg-accent) 0%, var(--bg) 32%, var(--bg) 100%);
+    }
+    body, button, input, select { font-size: 14px; }
+    .page-shell { max-width: 1920px; margin: 0 auto; padding: 20px; }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(26px, 3vw, 36px);
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+    }
+    .meta { margin-bottom: 14px; }
+    .meta-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: start; }
+    .meta-line {
+      color: var(--text-soft);
+      font-size: 13px;
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      align-items: center;
+    }
+    .meta-line span { white-space: nowrap; }
+    .summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+    .summary-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      min-width: 0;
+      box-shadow: var(--shadow-soft);
+      position: relative;
+      overflow: hidden;
+    }
+    .summary-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 4px;
+      background: var(--card-accent, var(--line));
+    }
+    .summary-card strong { display: block; font-size: 24px; line-height: 1.05; color: var(--text); }
+    .summary-card span { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; }
+    .summary-card.active { --card-accent: #0a7c00; }
+    .summary-card.waiting { --card-accent: #aa6a00; }
+    .summary-card.down { --card-accent: #b10000; }
+    .summary-card.help { --card-accent: #2d66c3; }
+    .summary-card.idle { --card-accent: #7b8696; }
+    .board-note {
+      margin: 2px 0 12px;
+      padding: 12px 14px;
+      border-radius: var(--radius);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      color: var(--text-soft);
+      font-size: 13px;
+      box-shadow: var(--shadow-soft);
+    }
+    .board-note strong { color: var(--text); }
+    .toolbar { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; flex-wrap: wrap; }
+    .config-box {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      box-shadow: var(--shadow-soft);
+    }
+    .config-box label {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-soft);
+      font-size: 13px;
+    }
+    .config-box input {
+      width: 64px;
+      padding: 7px 8px;
+      border-radius: 8px;
+      border: 1px solid var(--line-strong);
+      background: #fff;
+      color: var(--text);
+    }
+    .board-status {
+      display: none;
+      margin: 0 0 12px;
+      padding: 11px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: var(--surface);
+      box-shadow: var(--shadow-soft);
+      color: var(--text-soft);
+      font-size: 13px;
+    }
+    .board-status.is-visible { display: block; }
+    .board-status.is-success { border-color: rgba(10, 124, 0, 0.25); background: #f0fbf0; color: #185c18; }
+    .board-status.is-error { border-color: rgba(177, 0, 0, 0.25); background: #fff1f1; color: #8d0000; }
+    .board-status.is-working { border-color: rgba(45, 102, 195, 0.25); background: #eff5ff; color: #204b93; }
+    button {
+      padding: 9px 12px;
+      border: 1px solid var(--line-strong);
+      background: #fff;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 14px;
+      color: var(--text);
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease, background-color 120ms ease;
+    }
+    button:hover { box-shadow: var(--shadow-soft); }
+    button:active { transform: translateY(1px); }
+    button:focus-visible,
+    select:focus-visible,
+    input:focus-visible {
+      outline: 2px solid rgba(45, 102, 195, 0.35);
+      outline-offset: 2px;
+    }
+    button.primary { background: #111827; color: #fff; border-color: #111827; }
+    button.secondary { background: #fff; color: var(--text); border-color: var(--line-strong); }
+    button.danger { background: #b10000; color: #fff; border-color: #b10000; }
+    button.remove { background: none; border: none; color: var(--danger); font-size: 14px; cursor: pointer; padding: 2px 6px; line-height: 1; box-shadow: none; }
+    button.remove:hover { box-shadow: none; text-decoration: underline; }
+    .grid-content { display: grid; grid-template-columns: repeat(var(--ring-columns, 4), minmax(0, 1fr)); gap: 14px; }
+    .ring {
+      background: var(--surface);
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      padding: 14px;
+      box-shadow: var(--shadow-soft);
+      position: relative;
+      overflow: hidden;
+    }
+    .ring::before {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 5px;
+      background: var(--ring-accent, var(--line));
+    }
+    .ring.featured { border-color: var(--ring-accent, var(--line-strong)); border-width: 2px; }
+    .ring.tone-active { --ring-accent: #0a7c00; }
+    .ring.tone-idle { --ring-accent: #7b8696; background: var(--surface-subtle); }
+    .ring.tone-waiting { --ring-accent: #c78a00; }
+    .ring.tone-disconnected { --ring-accent: #d07a00; }
+    .ring.tone-medical { --ring-accent: #d60000; }
+    .ring.tone-arbitrator { --ring-accent: #7c4dff; }
+    .ring.tone-general { --ring-accent: #2d66c3; }
+    .ring-assist-medical { --ring-accent: #d60000; border-color: rgba(214, 0, 0, 0.35); }
+    .ring-assist-arbitrator { --ring-accent: #7c4dff; border-color: rgba(124, 77, 255, 0.35); }
+    .ring-assist-general { --ring-accent: #2d66c3; border-color: rgba(45, 102, 195, 0.35); }
+    .ring-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+    .ring h2 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; letter-spacing: -0.02em; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #edf2ff; color: #3557a5; font-size: 12px; font-weight: 600; }
+    .status-chip { display: inline-flex; align-items: center; padding: 5px 10px; border-radius: 999px; border: 1px solid transparent; font-size: 12px; font-weight: 700; white-space: nowrap; letter-spacing: 0.01em; }
+    .status-chip.status-ok { background: #e5f6e5; border-color: #bde3bd; color: var(--good); }
+    .status-chip.status-warn { background: #fff5df; border-color: #f2d08a; color: #a46a00; }
+    .status-chip.status-offline { background: #fff0df; border-color: #f0c08a; color: #b15f00; }
+    .status-chip.status-idle { background: #f1f3f6; border-color: #dde3ec; color: #5e6a79; }
+    .status-chip.status-medical { background: #fdeaea; border-color: #f0bbbb; color: var(--danger); }
+    .status-chip.status-arbitrator { background: #f3ecff; border-color: #d8c7ff; color: #5e35b1; }
+    .status-chip.status-general { background: #edf4ff; border-color: rgba(45, 102, 195, 0.25); color: #1f4f9a; }
+    .state-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 10px 0 12px; }
+    .state-item { background: var(--surface-subtle); border: 1px solid #e4e8ef; border-radius: var(--radius-sm); padding: 10px 10px 9px; }
+    .state-item span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-faint); margin-bottom: 3px; font-weight: 700; }
+    .state-item strong { font-size: 14px; color: var(--text); font-weight: 700; }
+    .state-sub { margin-top: 3px; font-size: 11px; color: var(--text-soft); }
+    .queue-list { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+    .queue-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; background: var(--surface-subtle); border: 1px solid #e4e8ef; border-radius: 10px; padding: 6px 10px; margin: 4px 0; }
+    .queue-empty { font-size: 13px; color: var(--text-soft); font-style: italic; margin: 4px 0 8px; }
+    .queue-empty.compact { background: var(--surface-subtle); border: 1px dashed #d9e0ea; border-radius: 10px; padding: 9px 10px; }
+    .section-label { font-size: 12px; font-weight: 700; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.5px; margin: 12px 0 4px; }
+    .controls { margin-top: 12px; display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid #e4e8ef; }
+    .controls .line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+    .controls .line.reset-line { grid-template-columns: 1fr; align-items: start; }
+    .controls select { min-width: 0; width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line-strong); background: #fff; color: var(--text); font-size: 13px; }
+    .controls .line button { min-width: 150px; white-space: nowrap; }
+    .controls .line.reset-line button { min-width: 0; width: fit-content; }
+    .controls .line .note { font-size: 12px; color: var(--text-soft); display: block; margin-top: -2px; }
+    .controls select.unassigned-select { font-style: italic; color: var(--text-soft); }
+    .queue-controls { display: grid; gap: 6px; }
+    .queue-controls .hint { font-size: 11px; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
+    .queue-controls .line { grid-template-columns: minmax(0, 1fr) auto; }
+    .queue-controls select { padding: 7px 10px; font-size: 12px; }
+    .queue-controls button { padding: 7px 12px; font-size: 13px; min-width: 92px; }
+    .status-ok { color: var(--good); }
+    .status-warn { color: var(--warn); }
+    .status-offline { color: #b15f00; }
+    .status-idle { color: #5e6a79; }
+    .status-medical { color: var(--danger); }
+    .status-arbitrator { color: #5e35b1; }
+    .status-general { color: #1f4f9a; }
+    .unassigned { font-style: italic; color: var(--text-soft); }
+    .assist-row { margin-top: 10px; padding: 10px 11px; border-radius: 10px; font-size: 13px; border: 1px solid; display: grid; gap: 4px; }
+    .assist-medical { background: #fff0f0; border-color: rgba(214, 0, 0, 0.32); color: #7a0000; }
+    .assist-arbitrator { background: #fff6e3; border-color: rgba(182, 127, 0, 0.32); color: #6b4a00; }
+    .assist-general { background: #edf4ff; border-color: rgba(45, 102, 195, 0.32); color: #1f3f73; }
+    hr.divider { border: none; border-top: 1px solid #e4e8ef; margin: 12px 0; }
+    .ring-intro { display: grid; gap: 6px; margin-bottom: 10px; }
+    .ring-intro .summary-copy { font-size: 13px; color: var(--text-soft); line-height: 1.4; }
+    .ring.is-idle .controls { margin-top: 8px; }
+    .ring.is-idle .ring-intro { margin-bottom: 6px; }
+    .ring.is-idle .summary-copy { font-size: 12px; }
+    .ring.featured .summary-copy { font-size: 14px; }
+    @media (max-width: 560px) {
+      .page-shell { padding: 14px; }
+      .meta-top { grid-template-columns: 1fr; }
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid-content { grid-template-columns: 1fr !important; }
+      .controls .line { grid-template-columns: 1fr; }
+      .controls .line button { width: 100%; min-width: 0; }
+      .ring-header { flex-direction: column; align-items: flex-start; }
+      .state-grid { grid-template-columns: 1fr; }
+      .queue-controls .line { grid-template-columns: 1fr; }
+      .queue-controls button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page-shell">
+    <h1>Head Table Dashboard</h1>
+    <div class="meta" id="meta">Loading...</div>
+    <div class="board-status" id="boardStatus" aria-live="polite"></div>
+    <div class="toolbar">
+      <button class="secondary" id="refreshBtn">⟳ Refresh</button>
+      <button class="danger" id="resetBtn">⚠ Reset Tournament</button>
+    </div>
+    <div id="board"></div>
+  </div>
+
+  <script>
+    const state = {
+      groups: [],
+      rings: [],
+      serverBaseUrl: '',
+      ringConfig: { letterCount: 1, numberCount: 2 },
+      heartbeatPolicy: { disconnectAfterSeconds: 90, resetMode: 'manual' },
+      lastLoadedAt: null
+    };
+
+    const boardEl = document.getElementById('board');
+    const metaEl = document.getElementById('meta');
+    const boardStatusEl = document.getElementById('boardStatus');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    function minutesAgo(isoText) {
+      if (!isoText) return Number.POSITIVE_INFINITY;
+      const date = new Date(isoText);
+      if (Number.isNaN(date.getTime())) return Number.POSITIVE_INFINITY;
+      return (Date.now() - date.getTime()) / 60000;
+    }
+
+    function formatDuration(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return '';
+      const totalSeconds = Math.floor(ms / 1000);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) {
+        return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+      }
+      if (minutes > 0) {
+        return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+      }
+      return `${seconds}s`;
+    }
+
+    function phaseAgeLabel(phaseStartedAt) {
+      if (!phaseStartedAt) return 'Age unknown';
+      const started = new Date(phaseStartedAt);
+      if (Number.isNaN(started.getTime())) return 'Age unknown';
+      return `Active for ${formatDuration(Date.now() - started.getTime())}`;
+    }
+
+    function ringHealth(ring) {
+      const ageMinutes = minutesAgo(ring.lastHeartbeatAt);
+      const disconnectAfterMinutes = state.heartbeatPolicy.disconnectAfterSeconds / 60;
+      const hasAssignment = !!ring.currentGroupId || (ring.queuedGroupIds || []).length > 0;
+      const hasTablet = !!ring.tabletLabel;
+
+      if (!hasTablet) {
+        return hasAssignment
+          ? {
+              label: 'Waiting',
+              className: 'status-warn',
+              tone: 'waiting',
+              detail: 'Queued or assigned, waiting for a tablet to connect.'
+            }
+          : {
+              label: 'Idle',
+              className: 'status-idle',
+              tone: 'idle',
+              detail: 'No tablet connected.'
+            };
+      }
+
+      if (!Number.isFinite(ageMinutes) || ageMinutes < disconnectAfterMinutes) {
+        return {
+          label: 'Connected',
+          className: 'status-ok',
+          tone: 'active',
+          detail: Number.isFinite(ageMinutes)
+            ? `Heartbeat ${ageMinutes.toFixed(1)} min ago.`
+            : 'Tablet connected; waiting for heartbeat.'
+        };
+      }
+
+      return hasAssignment
+        ? {
+            label: 'Disconnected',
+            className: 'status-offline',
+            tone: 'disconnected',
+            detail: `Last heartbeat ${ageMinutes.toFixed(1)} min ago. Assignment is preserved until manual reset.`
+          }
+        : {
+            label: 'Disconnected',
+            className: 'status-offline',
+            tone: 'disconnected',
+            detail: `Last heartbeat ${ageMinutes.toFixed(1)} min ago.`
+          };
+    }
+
+    function ringHealthCounts() {
+      const counts = { connected: 0, waiting: 0, disconnected: 0, idle: 0, assistance: 0 };
+      state.rings.forEach(ring => {
+        const health = ringHealth(ring);
+        if (health.label === 'Connected') counts.connected += 1;
+        else if (health.label === 'Idle') counts.idle += 1;
+        else if (health.className === 'status-warn') counts.waiting += 1;
+        else counts.disconnected += 1;
+        if (ring.assistanceType) counts.assistance += 1;
+      });
+      return counts;
+    }
+
+    function ringPriority(ring) {
+      const health = ringHealth(ring);
+      if (ring.assistanceType === 'medical') return [0, ring.ringId];
+      if (ring.assistanceType === 'arbitrator') return [1, ring.ringId];
+      if (ring.assistanceType === 'general') return [2, ring.ringId];
+      if (health.tone === 'disconnected') return [3, ring.ringId];
+      if (health.tone === 'active') return [4, ring.ringId];
+      if (health.tone === 'waiting') return [5, ring.ringId];
+      return [6, ring.ringId];
+    }
+
+    function assistanceLabel(type) {
+      if (type === 'medical') return 'Medical Assistance Requested';
+      if (type === 'arbitrator') return 'Arbitrator Requested';
+      return 'General Assistance Requested';
+    }
+
+    function setBoardStatus(message, kind) {
+      if (!boardStatusEl) return;
+      if (!message) {
+        boardStatusEl.className = 'board-status';
+        boardStatusEl.textContent = '';
+        return;
+      }
+      boardStatusEl.className = `board-status is-visible${kind ? ` is-${kind}` : ''}`;
+      boardStatusEl.textContent = message;
+    }
+
+    function summaryCardClass(label) {
+      if (label === 'Active') return 'active';
+      if (label === 'Waiting') return 'waiting';
+      if (label === 'Down') return 'down';
+      if (label === 'Help') return 'help';
+      return 'idle';
+    }
+
+    function groupLabel(groupId) {
+      const group = state.groups.find(g => g.groupId === groupId);
+      return group ? `${groupId} - ${group.name}` : groupId;
+    }
+
+    function ringGridCoordinates(ringLabel) {
+      const match = /^([A-Za-z]+)(\d+)$/.exec((ringLabel || '').trim());
+      if (!match) return null;
+      const letter = match[1].toUpperCase();
+      const number = Number.parseInt(match[2], 10);
+      if (!Number.isFinite(number)) return null;
+      return { letter, number, letterIndex: letter.charCodeAt(0) - 65 };
+    }
+
+    function ringGridSort(left, right) {
+      const leftCoords = ringGridCoordinates(left.ringLabel);
+      const rightCoords = ringGridCoordinates(right.ringLabel);
+      if (!leftCoords && !rightCoords) return left.ringId.localeCompare(right.ringId);
+      if (!leftCoords) return 1;
+      if (!rightCoords) return -1;
+      if (leftCoords.number !== rightCoords.number) return leftCoords.number - rightCoords.number;
+      if (leftCoords.letterIndex !== rightCoords.letterIndex) return leftCoords.letterIndex - rightCoords.letterIndex;
+      return left.ringId.localeCompare(right.ringId);
+    }
+
+    function groupOptions(skipIds = [], selected = '') {
+      const options = state.groups
+        .filter(g => !skipIds.includes(g.groupId))
+        .map(g => {
+          const isSelected = g.groupId === selected ? 'selected' : '';
+          return `<option value="${g.groupId}" ${isSelected}>${g.groupId} - ${g.name}</option>`;
+        })
+        .join('');
+      const placeholderSelected = selected === '' ? 'selected' : '';
+      return `<option value="" ${placeholderSelected}>Unassigned</option>${options}`;
+    }
+
+    function render() {
+      const counts = ringHealthCounts();
+      const resetLabel = state.heartbeatPolicy.resetMode === 'manual' ? 'manual per ring' : 'automatic';
+      const lastLoadedLabel = state.lastLoadedAt ? new Date(state.lastLoadedAt).toLocaleTimeString() : 'not loaded yet';
+      const refreshLabel = `Auto-refresh every 10s • Last loaded ${lastLoadedLabel}`;
+      metaEl.innerHTML = `
+        <div class="meta-top">
+          <div class="summary-grid">
+            <div class="summary-card ${summaryCardClass('Active')}"><strong>${counts.connected}</strong><span>Active</span></div>
+            <div class="summary-card ${summaryCardClass('Waiting')}"><strong>${counts.waiting}</strong><span>Waiting</span></div>
+            <div class="summary-card ${summaryCardClass('Down')}"><strong>${counts.disconnected}</strong><span>Down</span></div>
+            <div class="summary-card ${summaryCardClass('Help')}"><strong>${counts.assistance}</strong><span>Help</span></div>
+            <div class="summary-card ${summaryCardClass('Idle')}"><strong>${counts.idle}</strong><span>Idle</span></div>
+          </div>
+          <div class="config-box">
+            <strong>Ring Setup:</strong>
+            <label>Letters <input id="lettersInput" type="number" min="1" max="26"></label>
+            <label>Numbers <input id="numbersInput" type="number" min="1" max="50"></label>
+            <button class="primary" id="applyConfigBtn">Apply</button>
+          </div>
+        </div>
+        <div class="meta-line">
+          <span>Server: ${state.serverBaseUrl || location.origin}</span>
+          <span>Rings: ${state.rings.length}</span>
+          <span>Config: ${state.ringConfig.letterCount} letter(s) x ${state.ringConfig.numberCount} number(s)</span>
+          <span>Disconnect: ${state.heartbeatPolicy.disconnectAfterSeconds}s</span>
+          <span>Reset: ${resetLabel}</span>
+          <span>${refreshLabel}</span>
+        </div>`;
+
+      const lettersInput = document.getElementById('lettersInput');
+      const numbersInput = document.getElementById('numbersInput');
+      if (lettersInput) lettersInput.value = state.ringConfig.letterCount;
+      if (numbersInput) numbersInput.value = state.ringConfig.numberCount;
+
+      const rings = [...state.rings].sort((a, b) => {
+        const aPriority = ringPriority(a);
+        const bPriority = ringPriority(b);
+        for (let i = 0; i < aPriority.length; i += 1) {
+          if (aPriority[i] < bPriority[i]) return -1;
+          if (aPriority[i] > bPriority[i]) return 1;
+        }
+        return 0;
+      });
+
+      const attentionCount = rings.filter(ring => {
+        const health = ringHealth(ring);
+        return !!ring.assistanceType || health.tone === 'disconnected';
+      }).length;
+      const boardNote = attentionCount > 0
+        ? `${attentionCount} ring(s) need attention right now.`
+        : (counts.waiting > 0
+          ? `${counts.waiting} ring(s) are waiting on tablets.`
+          : 'All rings are stable. Nothing requires immediate action.');
+      const ringColumns = Math.max(1, Math.min(Number(state.ringConfig.numberCount) || 1, 5));
+
+      boardEl.innerHTML = `
+        ${boardNote ? `<div class="board-note">${boardNote}</div>` : ''}
+        <div class="grid-content">
+        ${rings.map(ring => {
+          const usedIds = [ring.currentGroupId, ...ring.queuedGroupIds].filter(Boolean);
+          const usedInOtherRings = state.rings
+            .filter(otherRing => otherRing.ringId !== ring.ringId)
+            .flatMap(otherRing => [otherRing.currentGroupId, ...(otherRing.queuedGroupIds || [])])
+            .filter(Boolean);
+          const unavailableIds = Array.from(new Set([...usedIds, ...usedInOtherRings]));
+          const assistanceType = (ring.assistanceType || '').toLowerCase();
+          const queueItems = ring.queuedGroupIds.map((gid, idx) => `
+            <li>
+              <span>${idx + 1}. ${groupLabel(gid)}</span>
+              <button class="remove" data-action="dequeue" data-ring="${ring.ringId}" data-group="${gid}" title="Remove from queue">x</button>
+            </li>`).join('');
+
+          const health = ringHealth(ring);
+          const toneClass = ring.assistanceType ? `tone-${assistanceType}` : `tone-${health.tone}`;
+          const ringClass = `ring ${toneClass}`.trim();
+          const featured = !!ring.assistanceType || health.tone === 'disconnected';
+          const phaseAge = phaseAgeLabel(ring.phaseStartedAt);
+          const ringClasses = [ringClass, featured ? 'featured' : '']
+            .filter(Boolean)
+            .join(' ');
+          const queueLabel = ring.queuedGroupIds.length ? `Queue (${ring.queuedGroupIds.length})` : 'Queue clear';
+          const statusChipClass = ring.assistanceType
+            ? `status-chip status-${assistanceType}`
+            : `status-chip ${health.className}`;
+
+          return `
+          <div class="${ringClasses}">
+            <div class="ring-header">
+              <h2>${ring.ringLabel} <span class="pill">${ring.ringId}</span></h2>
+              <span class="${statusChipClass}">${ring.assistanceType ? assistanceLabel(assistanceType) : health.label}</span>
+            </div>
+            <div class="ring-intro">
+              <div class="summary-copy ${ring.assistanceType ? `status-${assistanceType}` : health.className}">${health.detail}</div>
+            </div>
+            <div class="state-grid">
+              <div class="state-item">
+                <span>Current group</span>
+                <strong>${ring.currentGroupId ? groupLabel(ring.currentGroupId) : '<span class="unassigned">Unassigned</span>'}</strong>
+              </div>
+              <div class="state-item">
+                <span>Phase</span>
+                <strong>${ring.phase || 'idle'}</strong>
+                <div class="state-sub">${phaseAge}</div>
+              </div>
+              <div class="state-item">
+                <span>Queue</span>
+                <strong>${ring.queuedGroupIds.length}</strong>
+                <div class="state-sub">${ring.queuedGroupIds.length === 1 ? 'group queued' : 'groups queued'}</div>
+              </div>
+            </div>
+            ${assistanceType ? `
+            <div class="assist-row assist-${assistanceType}">
+              <strong>${assistanceLabel(assistanceType)}</strong>
+              <div>${ring.assistanceRequestedAt ? new Date(ring.assistanceRequestedAt).toLocaleTimeString() : ''}</div>
+              <button class="secondary" data-action="clear-assistance" data-ring="${ring.ringId}">Clear Alert</button>
+            </div>` : ''}
+
+            <hr class="divider">
+            ${ring.queuedGroupIds.length
+              ? `<div class="section-label">${queueLabel}</div><ul class="queue-list">${queueItems}</ul>`
+              : '<div class="queue-empty compact">Queue clear.</div>'}
+
+            <div class="controls queue-controls">
+              <div class="hint">Queue a group onto this ring</div>
+              <div class="line">
+                <select id="queue-${ring.ringId}" class="unassigned-select">${groupOptions(unavailableIds, '')}</select>
+                <button class="secondary" data-action="queue" data-ring="${ring.ringId}">Queue</button>
+              </div>
+              <div class="line reset-line">
+                <button class="danger" data-action="reset-ring" data-ring="${ring.ringId}">Reset Ring</button>
+                <span class="note">Clears the current group, queue, tablet, and assistance state.</span>
+              </div>
+            </div>
+
+          </div>`;
+        }).join('')}
+        </div>
+      `;
+    }
+
+    async function requestJson(url, options) {
+      const response = await fetch(url, options);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      return body;
+    }
+
+    async function loadData() {
+      const [groupsResult, ringsResult] = await Promise.all([
+        requestJson('/api/groups'),
+        requestJson('/api/rings')
+      ]);
+      state.groups = groupsResult.groups || [];
+      state.rings = ringsResult.rings || [];
+      state.serverBaseUrl = ringsResult.serverBaseUrl || '';
+      state.ringConfig = ringsResult.ringConfig || state.ringConfig;
+      state.heartbeatPolicy = ringsResult.heartbeatPolicy || state.heartbeatPolicy;
+      state.lastLoadedAt = new Date().toISOString();
+      render();
+    }
+
+    async function mutateRing(ringId, action, groupId) {
+      if (action === 'queue') {
+        const gid = groupId || document.getElementById(`queue-${ringId}`).value;
+        if (!gid) throw new Error('Select a group before adding to queue.');
+        await requestJson(`/api/rings/${ringId}/queue`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ groupId: gid })
+        });
+      } else if (action === 'dequeue') {
+        await requestJson(`/api/rings/${ringId}/queue/${groupId}`, { method: 'DELETE' });
+      } else if (action === 'clear-assistance') {
+        await requestJson(`/api/rings/${ringId}/assistance/clear`, { method: 'POST' });
+      } else if (action === 'reset-ring') {
+        if (!confirm(`Reset ${ringId}?\n\nThis clears the ring, queue, tablet, and assistance state.`)) return;
+        await requestJson(`/api/rings/${ringId}/reset`, { method: 'POST' });
+      }
+      await loadData();
+    }
+
+    refreshBtn.addEventListener('click', async () => {
+      setBoardStatus('Refreshing board...', 'working');
+      try {
+        await loadData();
+        setBoardStatus('Board refreshed.', 'success');
+      } catch (e) {
+        setBoardStatus(`Refresh failed: ${e.message}`, 'error');
+        alert(e.message);
+      }
+    });
+
+    resetBtn.addEventListener('click', async () => {
+      if (!confirm('Reset tournament?\n\nThis clears all assignments, queues, and tablet connections.')) return;
+      setBoardStatus('Resetting tournament...', 'working');
+      try {
+        await requestJson('/api/reset', { method: 'POST' });
+        await loadData();
+        setBoardStatus('Tournament reset.', 'success');
+      } catch (e) {
+        setBoardStatus(`Reset failed: ${e.message}`, 'error');
+        alert(e.message);
+      }
+    });
+
+    metaEl.addEventListener('click', async (event) => {
+      if (!(event.target instanceof Element)) return;
+      const target = event.target.closest('#applyConfigBtn');
+      if (!target) return;
+      const lettersInput = document.getElementById('lettersInput');
+      const numbersInput = document.getElementById('numbersInput');
+      const letterCount = Number.parseInt(lettersInput.value, 10);
+      const numberCount = Number.parseInt(numbersInput.value, 10);
+      if (!Number.isFinite(letterCount) || !Number.isFinite(numberCount)) {
+        alert('Enter valid numbers for letters and ring numbers.');
+        return;
+      }
+      if (!confirm('Apply new ring configuration?\n\nThis resets all ring assignments to scratch.')) return;
+      setBoardStatus('Applying new ring configuration...', 'working');
+      try {
+        await requestJson('/api/rings/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ letterCount, numberCount })
+        });
+        await loadData();
+        setBoardStatus('Ring configuration updated.', 'success');
+      } catch (e) {
+        setBoardStatus(`Config update failed: ${e.message}`, 'error');
+        alert(e.message);
+      }
+    });
+
+    boardEl.addEventListener('click', async (event) => {
+      if (!(event.target instanceof Element)) return;
+      const target = event.target.closest('button[data-action]');
+      if (!target) return;
+      const action = target.getAttribute('data-action');
+      const ringId = target.getAttribute('data-ring');
+      const groupId = target.getAttribute('data-group') || undefined;
+      try {
+        setBoardStatus(action === 'queue'
+          ? 'Queueing group...'
+          : action === 'dequeue'
+            ? 'Removing queued group...'
+            : action === 'clear-assistance'
+              ? 'Clearing assistance...'
+              : 'Resetting ring...', 'working');
+        await mutateRing(ringId, action, groupId);
+        setBoardStatus('Ring updated.', 'success');
+      } catch (e) {
+        setBoardStatus(`Update failed: ${e.message}`, 'error');
+        alert(e.message);
+      }
+    });
+
+    boardEl.addEventListener('change', (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLSelectElement)) return;
+      if (target.value === '') {
+        target.classList.add('unassigned-select');
+      } else {
+        target.classList.remove('unassigned-select');
+      }
+    });
+
+    loadData().catch(e => {
+      setBoardStatus(`Failed to load board: ${e.message}`, 'error');
+      metaEl.textContent = `Failed to load board: ${e.message}`;
+    });
+
+    setInterval(() => { loadData().catch(() => {}); }, 10000);
+  </script>
+</body>
+</html>

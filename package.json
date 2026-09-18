@@ -1,0 +1,17 @@
+{
+  "name": "tournament-group-delivery",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "export-groups": "node group-export.js",
+    "serve-groups": "node group-server.js",
+    "generate-qr": "node generate-qr.js",
+    "cup-winners": "node cup-winners.js",
+    "competitor-winners": "node competitor-winners.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "pdfkit": "^0.20.1",
+    "qrcode": "^1.5.4"
+  }
+}
