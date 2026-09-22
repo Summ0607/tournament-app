@@ -4,8 +4,8 @@
 |---|---|
 | Document Type | High-Level Design (HLD) |
 | Status | Draft |
-| Version | 0.1 |
-| Date | 18 September 2026 |
+| Version | 0.2 |
+| Date | 22 September 2026 |
 | Author | Scott |
 | Language | Kotlin |
 | Package | `com.summ0.tournamentscoringapp` |
@@ -108,7 +108,8 @@ This is the main operational screen after a ring is connected. It shows the acti
 - Toggle sparring opt-out status for competitors.
 - Offer assistance actions and reconnect actions while assigned to a ring.
 - Advance into the scoring flows when a group is loaded.
-- Keep the screen alive with periodic heartbeat calls and reconnect handling.
+- Keep the screen alive with immediate heartbeat calls on screen/ring/progress changes plus a 60-second periodic heartbeat while assigned to a ring.
+- Surface the head-table progress payload as completed/total/percent values.
 
 ### 3.4 — Weapons Scoring Screen
 
@@ -123,13 +124,14 @@ Local scoring flow for weapons/hyungs-style forms judging. Judges enter numeric 
 
 ### 3.5 — Hyungs Scoring Screen
 
-Same scoring engine as weapons, but with the hyungs catalog and related placement flow.
+Same scoring engine as weapons, but with the hyungs catalog and related placement flow. TTLD is accepted as an under-6 rank and may enter hyungs and sparring, but it does not receive weapons eligibility.
 
 **Key responsibilities:**
 
 - Reuse the same numeric scoring and placement logic.
 - Support tie-break recovery and re-finalization.
 - Preserve per-competitor score state in memory for the current session.
+- Respect rank-specific catalog rules, including TTLD's "Any creative set of techniques" hyung eligibility.
 
 ### 3.6 — Sparring Bracket / Overall Awards / Assistance
 
@@ -156,6 +158,7 @@ The app keeps competition state in memory and persists only a few durable artifa
 - `GroupBanner` tracks the currently loaded group shown in the header.
 - `Competitor`, `Division`, `CompetitionEntry`, and the scoring maps in `MainActivity` hold the live in-memory tournament workflow.
 - `SparringBoutProgress`, `PlacementFinalizeState`, `PendingTieBreak`, and `SparringBoutAssessment` hold transient scoring state for the current session.
+- `rankDivisionLevels`, `rankSortOrder`, and `TournamentEngine.rankFormCatalog` encode client-side rank eligibility, including TTLD as an accepted under-6 rank.
 - Completed division artifacts are written locally so the app can rebuild championship standings and reopen prior results without the server.
     
 
@@ -180,7 +183,7 @@ The app talks to the tournament server over HTTP on the venue LAN. The current c
 | GET | `/api/version` | Update check | Compare the server app version to the installed client. |
 | GET | `/download-app` | Update flow | Download the updated APK when a newer version is available. |
 
-Refresh behavior is not a generic ring-state poll; the app refreshes launch availability while disconnected, sends heartbeats while assigned, and retries completion while waiting for the next group.
+Refresh behavior is not a generic ring-state poll; the app refreshes launch availability while disconnected, sends heartbeats while assigned, and retries completion while waiting for the next group. Heartbeat payloads carry the current phase plus completed/total counts and percent progress.
 
 
 ---
@@ -254,12 +257,14 @@ For server-side route details and ring assignment logic, refer to the server HLD
 - ✅ Check-in list, tap-to-toggle status, and sparring opt-out
 - ✅ Checked-in count and entrant summary
 - ✅ Assistance button and reconnect handling
+- ✅ Heartbeat progress updates on screen/ring/progress changes and every 60 seconds while assigned
 - 🔄 No server POST for check-in state in the current MainActivity flow
 
 ### Scoring / Awards
 
 - ✅ Weapons scoring screen with judge entry and tie-break handling
 - ✅ Hyungs scoring screen with judge entry and tie-break handling
+- ✅ TTLD accepted as an under-6 rank with hyungs-only eligibility ("Any creative set of techniques")
 - ✅ Sparring bracket, bout dialog, and winner progression
 - ✅ Overall awards screen, packet generation, and local receipt persistence
 - 🔄 No server POST for score submission in the current MainActivity flow
@@ -277,15 +282,11 @@ For server-side route details and ring assignment logic, refer to the server HLD
 - ☐ UI / integration tests for launcher, check-in, scoring, and assistance flows
       
 
-    
-
 ---
-
-  
-    
 
 ## 10 — Revision History
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
+| 0.2 | 2026-09-22 | Scott | Revised to match current client behavior: TTLD support, hyungs-only eligibility, heartbeat cadence, and updated checklist coverage. |
 | 0.1 | 2026-09-18 | Scott | Initial HLD draft for Android client; checklist updated to reflect the current MainActivity flow, local scoring workflow, update flow, and existing test coverage. |
