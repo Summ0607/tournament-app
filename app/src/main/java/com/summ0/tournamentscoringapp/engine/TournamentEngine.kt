@@ -10,6 +10,11 @@ object TournamentEngine {
 
     private val rankFormCatalog = listOf(
         RankFormEligibility(
+            rank = "TTLD",
+            emptyHandForms = listOf("Any creative set of techniques"),
+            weaponForms = emptyList()
+        ),
+        RankFormEligibility(
             rank = "10th Gup",
             emptyHandForms = listOf("Sae Kye Hyung II Bu"),
             weaponForms = emptyList()

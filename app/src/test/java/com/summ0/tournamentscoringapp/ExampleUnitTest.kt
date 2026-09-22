@@ -23,6 +23,10 @@ class ExampleUnitTest {
     @Test
     fun getAllowedHyungForms_returnsEmptyHandCatalogForRanks() {
         assertEquals(
+            listOf("Any creative set of techniques"),
+            TournamentEngine.getAllowedHyungForms("TTLD", HyungDiscipline.HYUNGS)
+        )
+        assertEquals(
             listOf("Pyung Ahn Sah Dan", "Oh Dan"),
             TournamentEngine.getAllowedHyungForms("3rd Gup", HyungDiscipline.HYUNGS)
         )
@@ -34,6 +38,9 @@ class ExampleUnitTest {
 
     @Test
     fun getAllowedHyungForms_returnsWeaponCatalogForRanks() {
+        assertTrue(
+            TournamentEngine.getAllowedHyungForms("TTLD", HyungDiscipline.WEAPONS).isEmpty()
+        )
         assertEquals(
             listOf("Bong Hyung II Bu"),
             TournamentEngine.getAllowedHyungForms("4th Gup", HyungDiscipline.WEAPONS)

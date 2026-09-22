@@ -119,6 +119,7 @@ import androidx.compose.ui.graphics.Color
 import com.summ0.tournamentscoringapp.ui.theme.TournamentScoringAppTheme
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.random.Random
 import kotlinx.coroutines.delay
 
@@ -266,6 +267,8 @@ private data class RingAssignment(
     val ringLabel: String,
     val serverBaseUrl: String,
     val currentGroup: RemoteGroup?,
+    val currentPhase: String = "",
+    val phasePlan: String = "",
     val queuedGroupIds: List<String>,
     val completedGroupIds: List<String>
 )
@@ -624,6 +627,112 @@ private fun screenPhase(screen: CompetitionScreen): String = when (screen) {
     CompetitionScreen.OVERALL_AWARDS -> "awards"
 }
 
+private data class HeartbeatProgressSnapshot(
+    val completedCount: Int,
+    val totalCount: Int
+) {
+    val percent: Int
+        get() = if (totalCount <= 0) {
+            0
+        } else {
+            ((completedCount.coerceAtMost(totalCount).toDouble() / totalCount.toDouble()) * 100.0)
+                .roundToInt()
+                .coerceIn(0, 100)
+        }
+}
+
+private fun heartbeatProgressSnapshot(completedCount: Int, totalCount: Int): HeartbeatProgressSnapshot {
+    return HeartbeatProgressSnapshot(
+        completedCount = completedCount.coerceAtLeast(0),
+        totalCount = totalCount.coerceAtLeast(0)
+    )
+}
+
+private fun setupHeartbeatProgress(competitors: List<Competitor>): HeartbeatProgressSnapshot {
+    val checkedInCount = competitors.count { it.checkInStatus == CheckInStatus.CHECKED_IN }
+    return heartbeatProgressSnapshot(checkedInCount, competitors.size)
+}
+
+private fun scoringHeartbeatProgress(
+    competitors: List<Competitor>,
+    scoresByCompetitor: Map<String, List<String>>
+): HeartbeatProgressSnapshot {
+    val completed = competitors.count { competitor ->
+        calculateScoreTotal(scoresByCompetitor[competitor.id] ?: emptyList()) != null
+    }
+    return heartbeatProgressSnapshot(completed, competitors.size)
+}
+
+private fun sparringHeartbeatProgress(
+    round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
+    winnersByRound: Map<Int, Map<Int, Competitor>>
+): HeartbeatProgressSnapshot {
+    val rounds = buildBracketSheetRounds(round0Bouts, winnersByRound)
+    var completed = 0
+    var total = 0
+    rounds.forEachIndexed { roundIndex, round ->
+        val roundWinners = winnersByRound[roundIndex] ?: emptyMap()
+        round.slots.forEachIndexed { boutIndex, bout ->
+            total += 1
+            if (selectedWinnerForDisplay(roundIndex, boutIndex, bout, roundWinners) != null) {
+                completed += 1
+            }
+        }
+    }
+    return heartbeatProgressSnapshot(completed, total)
+}
+
+private fun awardsHeartbeatProgress(
+    competitors: List<Competitor>,
+    weaponsLabels: Map<String, String>,
+    hyungsLabels: Map<String, String>,
+    sparringWinners: Map<Int, Map<Int, Competitor>>,
+    round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>
+): HeartbeatProgressSnapshot {
+    val awardsSummary = buildOverallAwardsSummary(
+        competitors = competitors,
+        weaponsLabels = weaponsLabels,
+        hyungsLabels = hyungsLabels,
+        sparringWinners = sparringWinners,
+        round0Bouts = round0Bouts
+    )
+    val placements = buildList {
+        addAll(awardsSummary.weapons)
+        addAll(awardsSummary.hyungs)
+        addAll(awardsSummary.sparring)
+    }
+    val completed = placements.count { it.second != null }
+    return heartbeatProgressSnapshot(completed, placements.size)
+}
+
+private fun heartbeatProgressForPhase(
+    phase: String,
+    competitors: List<Competitor>,
+    weaponsSheetCompetitors: List<Competitor>,
+    weaponsScoresByCompetitor: Map<String, List<String>>,
+    hyungsSheetCompetitors: List<Competitor>,
+    hyungsScoresByCompetitor: Map<String, List<String>>,
+    sparringRound0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
+    sparringWinners: Map<Int, Map<Int, Competitor>>,
+    weaponsFinalizeState: PlacementFinalizeState,
+    hyungsFinalizeState: PlacementFinalizeState
+): HeartbeatProgressSnapshot {
+    return when (phase) {
+        "check-in", "setup" -> setupHeartbeatProgress(competitors)
+        "weapons" -> scoringHeartbeatProgress(weaponsSheetCompetitors, weaponsScoresByCompetitor)
+        "hyungs" -> scoringHeartbeatProgress(hyungsSheetCompetitors, hyungsScoresByCompetitor)
+        "sparring" -> sparringHeartbeatProgress(sparringRound0Bouts, sparringWinners)
+        "awards" -> awardsHeartbeatProgress(
+            competitors = competitors,
+            weaponsLabels = weaponsFinalizeState.labels,
+            hyungsLabels = hyungsFinalizeState.labels,
+            sparringWinners = sparringWinners,
+            round0Bouts = sparringRound0Bouts
+        )
+        else -> heartbeatProgressSnapshot(0, 0)
+    }
+}
+
 private fun parseRemoteGroup(root: JSONObject): RemoteGroup {
     val groupId = root.optString("groupId", "").ifBlank { "group-unknown" }
     val name = root.optString("name", "Group")
@@ -736,6 +845,10 @@ private suspend fun fetchRingAssignment(
                 ringLabel = root.optString("ringLabel", ringId.ifBlank { "Ring" }),
                 serverBaseUrl = serverBaseUrl,
                 currentGroup = root.optJSONObject("currentGroup")?.let(::parseRemoteGroup),
+                currentPhase = root.optString("currentPhase", "").trim(),
+                phasePlan = root.opt("phasePlan").let { value ->
+                    if (value == null || value == JSONObject.NULL) "" else value.toString()
+                },
                 queuedGroupIds = root.optStringList("queuedGroupIds"),
                 completedGroupIds = root.optStringList("completedGroupIds")
             )
@@ -823,13 +936,19 @@ private suspend fun sendRingHeartbeat(
     serverBaseUrl: String,
     ringId: String,
     phase: String,
-    tabletLabel: String
+    tabletLabel: String,
+    progress: HeartbeatProgressSnapshot
 ) : JsonFetchResult {
     if (ringId.isBlank()) return JsonFetchResult()
     val heartbeatUrl = "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/heartbeat"
     val payload = JSONObject()
         .put("phase", phase)
         .put("tabletLabel", tabletLabel)
+        .put("checkInCount", progress.completedCount)
+        .put("checkInTotal", progress.totalCount)
+        .put("phaseCompletedCount", progress.completedCount)
+        .put("phaseTotalCount", progress.totalCount)
+        .put("phaseProgress", progress.percent)
     return fetchJsonObject(heartbeatUrl, method = "POST", jsonBody = payload)
 }
 
@@ -904,7 +1023,6 @@ internal fun CheckInScreen(
     var remoteStatus by remember { mutableStateOf("Connect a ring to begin.") }
     var isLoadingGroup by remember { mutableStateOf(false) }
     var isCompletingGroup by remember { mutableStateOf(false) }
-    var groupLoadRequested by remember { mutableStateOf(false) }
     var ringConnectionNeedsReconnect by rememberSaveable { mutableStateOf(false) }
     var serverConnectionModeName by rememberSaveable { mutableStateOf(initialServerConnectionConfig.mode.name) }
     var lastDnsName by rememberSaveable {
@@ -944,6 +1062,68 @@ internal fun CheckInScreen(
     var isDownloadingUpdate by remember { mutableStateOf(false) }
     var updateDownloadError by remember { mutableStateOf("") }
     var showExitConfirmationDialog by remember { mutableStateOf(false) }
+
+    val weaponsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
+        val lockedWeaponsIds = phaseEntrants[CompetitionType.WEAPONS]
+        val eligible = if (CompetitionType.WEAPONS in lockedPhases && lockedWeaponsIds != null) {
+            competitors.filter { it.id in lockedWeaponsIds }
+        } else {
+            competitors.filter { TournamentEngine.isEligibleForCompetition(it, CompetitionType.WEAPONS) }
+        }
+        randomizeScoringSheetCompetitors(eligible, CompetitionType.WEAPONS)
+    }
+    val hyungsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
+        val lockedHyungsIds = phaseEntrants[CompetitionType.HYUNGS]
+        val eligible = if (CompetitionType.HYUNGS in lockedPhases && lockedHyungsIds != null) {
+            competitors.filter { it.id in lockedHyungsIds }
+        } else {
+            competitors.filter { TournamentEngine.isEligibleForCompetition(it, CompetitionType.HYUNGS) }
+        }
+        randomizeScoringSheetCompetitors(eligible, CompetitionType.HYUNGS)
+    }
+    val sparringCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
+        val lockedSparringIds = phaseEntrants[CompetitionType.SPARRING]
+        if (CompetitionType.SPARRING in lockedPhases && lockedSparringIds != null) {
+            competitors.filter { it.id in lockedSparringIds }
+        } else {
+            competitors.filter { TournamentEngine.isEligibleForCompetition(it, CompetitionType.SPARRING) }
+        }
+    }
+    val sparringRound0Bouts = remember(sparringCompetitors) {
+        if (sparringCompetitors.isEmpty()) {
+            emptyList()
+        } else {
+            val seed = sparringCompetitors.sortedBy { it.id }.fold(0) { acc, competitor ->
+                31 * acc + competitor.id.hashCode()
+            }
+            separateStudioPairs(TournamentEngine.createFirstRoundSparringBouts(sparringCompetitors, seed))
+        }
+    }
+    val judgeCount = if (useOnlyThreeJudges) 3 else 5
+    val nextCompetitionButtonLabel = when {
+        weaponsSheetCompetitors.isNotEmpty() -> "Open Weapons"
+        hyungsSheetCompetitors.isNotEmpty() -> "Open Hyungs"
+        else -> null
+    }
+    val entrantsSummaryText = "Entrants - Weapons: ${
+        phaseEntrantCount(CompetitionType.WEAPONS, phaseEntrants, competitors)
+    }${if (CompetitionType.WEAPONS in lockedPhases) " (Locked)" else ""} | " +
+        "Hyungs: ${phaseEntrantCount(CompetitionType.HYUNGS, phaseEntrants, competitors)}" +
+        "${if (CompetitionType.HYUNGS in lockedPhases) " (Locked)" else ""} | " +
+        "Sparring: ${phaseEntrantCount(CompetitionType.SPARRING, phaseEntrants, competitors)}" +
+        "${if (CompetitionType.SPARRING in lockedPhases) " (Locked)" else ""}"
+    val currentHeartbeatProgress = heartbeatProgressForPhase(
+        phase = controlBoardPhase,
+        competitors = competitors,
+        weaponsSheetCompetitors = weaponsSheetCompetitors,
+        weaponsScoresByCompetitor = weaponsScoresByCompetitor,
+        hyungsSheetCompetitors = hyungsSheetCompetitors,
+        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
+        sparringRound0Bouts = sparringRound0Bouts,
+        sparringWinners = sparringWinners,
+        weaponsFinalizeState = weaponsFinalizeState,
+        hyungsFinalizeState = hyungsFinalizeState
+    )
 
     fun resetCompetitionState() {
         lockedPhases = emptySet()
@@ -1021,7 +1201,6 @@ internal fun CheckInScreen(
         currentRingId = ""
         currentRingLabel = ""
         selectedLaunchRingId = ""
-        groupLoadRequested = false
         ringConnectionNeedsReconnect = false
         remoteStatus = message
         launchServerStatus = message
@@ -1207,19 +1386,11 @@ internal fun CheckInScreen(
             }
             val hadAssignedRing = currentRingId.isNotBlank()
             val preserveLoadedGroupOnReconnect = hadAssignedRing && currentGroupBanner.isLoaded
-            val requestedBootstrapUrl = "${serverBaseUrl.trimEnd('/')}/api/rings/$selectedRingId/bootstrap"
+            val requestGroupUrl = "${serverBaseUrl.trimEnd('/')}/api/rings/$selectedRingId/request-group"
             isLoadingGroup = true
-            if (!preserveLoadedGroupOnReconnect) {
-                groupLoadRequested = false
-            }
             remoteStatus = "Connecting ring..."
-            val encodedTabletLabel = URLEncoder.encode(tabletLabel, Charsets.UTF_8.name())
-            val bootstrapWithTabletLabel = if (requestedBootstrapUrl.contains("?")) {
-                "$requestedBootstrapUrl&tabletLabel=$encodedTabletLabel"
-            } else {
-                "$requestedBootstrapUrl?tabletLabel=$encodedTabletLabel"
-            }
-            val fetchResult = fetchRingAssignment(bootstrapWithTabletLabel)
+            val requestGroupBody = JSONObject().put("tabletLabel", tabletLabel)
+            val fetchResult = fetchRingAssignment(requestGroupUrl, method = "POST", jsonBody = requestGroupBody)
             val assignment = fetchResult.assignment
             if (assignment != null) {
                 selectedLaunchRingId = assignment.ringId
@@ -1237,7 +1408,8 @@ internal fun CheckInScreen(
                         serverBaseUrl = assignment.serverBaseUrl,
                         ringId = assignment.ringId,
                         phase = controlBoardPhase,
-                        tabletLabel = tabletLabel
+                        tabletLabel = tabletLabel,
+                        progress = currentHeartbeatProgress
                     )
                 )
                 onSuccess?.invoke()
@@ -1314,7 +1486,8 @@ internal fun CheckInScreen(
                         serverBaseUrl = assignment.serverBaseUrl,
                         ringId = assignment.ringId,
                         phase = controlBoardPhase,
-                        tabletLabel = tabletLabel
+                        tabletLabel = tabletLabel,
+                        progress = currentHeartbeatProgress
                     )
                 )
             } else {
@@ -1381,35 +1554,37 @@ internal fun CheckInScreen(
     }
 
     // Heartbeat on screen/ring change
-    LaunchedEffect(currentScreen, currentRingId, serverBaseUrl, currentGroupBanner.groupId, controlBoardPhase) {
+    LaunchedEffect(
+        currentScreen,
+        currentRingId,
+        serverBaseUrl,
+        currentGroupBanner.groupId,
+        controlBoardPhase,
+        currentHeartbeatProgress.completedCount,
+        currentHeartbeatProgress.totalCount,
+        currentHeartbeatProgress.percent
+    ) {
         if (currentRingId.isNotBlank()) {
             val heartbeatResult = sendRingHeartbeat(
                 serverBaseUrl = serverBaseUrl,
                 ringId = currentRingId,
                 phase = controlBoardPhase,
-                tabletLabel = tabletLabel
+                tabletLabel = tabletLabel,
+                progress = currentHeartbeatProgress
             )
             applyRingContactResult(heartbeatResult)
         }
     }
 
-    LaunchedEffect(currentRingId, serverBaseUrl, currentGroupBanner.isLoaded, groupLoadRequested) {
-        if (currentRingId.isBlank() || !groupLoadRequested || currentGroupBanner.isLoaded) return@LaunchedEffect
-
-        if (remoteStatus == "Connect a ring to begin.") {
-            remoteStatus = "Unassigned"
-        }
-
-        while (currentRingId.isNotBlank() && !currentGroupBanner.isLoaded) {
-            if (!isCompletingGroup) {
-                completeCurrentGroup()
-            }
-            delay(15_000L)
-        }
-    }
-
     // Periodic heartbeat every 60 seconds while assigned to a ring
-    LaunchedEffect(currentRingId, serverBaseUrl, controlBoardPhase) {
+    LaunchedEffect(
+        currentRingId,
+        serverBaseUrl,
+        controlBoardPhase,
+        currentHeartbeatProgress.completedCount,
+        currentHeartbeatProgress.totalCount,
+        currentHeartbeatProgress.percent
+    ) {
         if (currentRingId.isNotBlank()) {
             while (true) {
                 delay(60_000L)
@@ -1417,7 +1592,8 @@ internal fun CheckInScreen(
                     serverBaseUrl = serverBaseUrl,
                     ringId = currentRingId,
                     phase = controlBoardPhase,
-                    tabletLabel = tabletLabel
+                    tabletLabel = tabletLabel,
+                    progress = currentHeartbeatProgress
                 )
                 if (currentRingId.isNotBlank()) {
                     applyRingContactResult(heartbeatResult)
@@ -1452,46 +1628,6 @@ internal fun CheckInScreen(
             currentScreen != CompetitionScreen.CHECK_IN -> moveToScreen(CompetitionScreen.CHECK_IN)
         }
     }
-
-    val weaponsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
-        val lockedWeaponsIds = phaseEntrants[CompetitionType.WEAPONS]
-        val eligible = if (CompetitionType.WEAPONS in lockedPhases && lockedWeaponsIds != null) {
-            competitors.filter { it.id in lockedWeaponsIds }
-        } else {
-            competitors.filter { TournamentEngine.isEligibleForCompetition(it, CompetitionType.WEAPONS) }
-        }
-        randomizeScoringSheetCompetitors(eligible, CompetitionType.WEAPONS)
-    }
-    val hyungsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
-        val lockedHyungsIds = phaseEntrants[CompetitionType.HYUNGS]
-        val eligible = if (CompetitionType.HYUNGS in lockedPhases && lockedHyungsIds != null) {
-            competitors.filter { it.id in lockedHyungsIds }
-        } else {
-            competitors.filter { TournamentEngine.isEligibleForCompetition(it, CompetitionType.HYUNGS) }
-        }
-        randomizeScoringSheetCompetitors(eligible, CompetitionType.HYUNGS)
-    }
-    val sparringCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
-        val lockedSparringIds = phaseEntrants[CompetitionType.SPARRING]
-        if (CompetitionType.SPARRING in lockedPhases && lockedSparringIds != null) {
-            competitors.filter { it.id in lockedSparringIds }
-        } else {
-            competitors.filter { TournamentEngine.isEligibleForCompetition(it, CompetitionType.SPARRING) }
-        }
-    }
-    val judgeCount = if (useOnlyThreeJudges) 3 else 5
-    val nextCompetitionButtonLabel = when {
-        weaponsSheetCompetitors.isNotEmpty() -> "Open Weapons"
-        hyungsSheetCompetitors.isNotEmpty() -> "Open Hyungs"
-        else -> null
-    }
-    val entrantsSummaryText = "Entrants - Weapons: ${
-        phaseEntrantCount(CompetitionType.WEAPONS, phaseEntrants, competitors)
-    }${if (CompetitionType.WEAPONS in lockedPhases) " (Locked)" else ""} | " +
-        "Hyungs: ${phaseEntrantCount(CompetitionType.HYUNGS, phaseEntrants, competitors)}" +
-        "${if (CompetitionType.HYUNGS in lockedPhases) " (Locked)" else ""} | " +
-        "Sparring: ${phaseEntrantCount(CompetitionType.SPARRING, phaseEntrants, competitors)}" +
-        "${if (CompetitionType.SPARRING in lockedPhases) " (Locked)" else ""}"
 
     if (showExitConfirmationDialog) {
         AlertDialog(
@@ -1807,22 +1943,12 @@ internal fun CheckInScreen(
     }
 
     if (currentScreenState.value == CompetitionScreen.OVERALL_AWARDS) {
-        val round0Bouts = remember(sparringCompetitors) {
-            if (sparringCompetitors.isEmpty()) {
-                emptyList()
-            } else {
-                val seed = sparringCompetitors.sortedBy { it.id }.fold(0) { acc, competitor ->
-                    31 * acc + competitor.id.hashCode()
-                }
-                separateStudioPairs(TournamentEngine.createFirstRoundSparringBouts(sparringCompetitors, seed))
-            }
-        }
         val overallAwards = buildOverallAwardsSummary(
             competitors = competitors,
             weaponsLabels = weaponsFinalizeState.labels,
             hyungsLabels = hyungsFinalizeState.labels,
             sparringWinners = sparringWinners,
-            round0Bouts = round0Bouts
+            round0Bouts = sparringRound0Bouts
         )
         OverallAwardsScreen(
             groupBanner = currentGroupBanner,
@@ -1843,7 +1969,7 @@ internal fun CheckInScreen(
             hyungsPlacementsByCompetitorId = hyungsFinalizeState.labels,
             hyungsTieBreakDetailsByCompetitorId = hyungsFinalizeState.tieBreakDetails,
             sparringReviewLines = buildSparringReviewLines(
-                round0Bouts = round0Bouts,
+                round0Bouts = sparringRound0Bouts,
                 winnersByRound = sparringWinners,
                 boutProgressByKey = sparringBoutProgress
             ),
@@ -2605,7 +2731,7 @@ private fun LaunchScreenPanel(
                     }
                 } else if (isAssigned) {
                     Text(
-                        text = "Connected. Auto-load will keep checking for the next group.",
+                        text = "Connected. Waiting for the next group.",
                         fontSize = if (isCompactScreen) 13.sp else 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -3843,7 +3969,7 @@ private fun categoryBandForAge(age: Int): String {
 }
 
 private fun categoryBandForRank(rank: String): String {
-    return if (rankLevelFor(rank) > 0) "Gup" else "Black Belt"
+    return if (normalizeRank(rank) == "ttld" || rankLevelFor(rank) > 0) "Gup" else "Black Belt"
 }
 
 private fun championshipCategoryForCompetitor(age: Int, rank: String): String {
@@ -3949,6 +4075,12 @@ private fun rebuildChampionshipStandings(context: Context) {
     }
 
     resultsDir.resolve("standings.json").writeText(standings.toString(2))
+}
+
+private fun isMissingRouteError(errorMessage: String?): Boolean {
+    return errorMessage?.contains("HTTP 404") == true ||
+        errorMessage?.contains("HTTP 405") == true ||
+        errorMessage?.contains("HTTP 501") == true
 }
 
 private fun persistDivisionPacketReceipt(
@@ -5771,6 +5903,7 @@ private fun calculateScoreTotal(scoreInputs: List<String>): Double? {
 }
 
 private val rankDivisionLevels = mapOf(
+    "ttld" to 0,
     "1st gup" to 1,
     "2nd gup" to 2,
     "3rd gup" to 3,
@@ -5781,14 +5914,15 @@ private val rankDivisionLevels = mapOf(
     "8th gup" to 8,
     "9th gup" to 9,
     "10th gup" to 10,
-    "cdb" to 0,
-    "cho dan bo" to 0,
+    "cdb" to 11,
+    "cho dan bo" to 11,
     "cho dan" to -1,
     "e dan" to -2,
     "sam dan" to -3
 )
 
 private val rankSortOrder = mapOf(
+    "ttld" to 0,
     "10th gup" to 1,
     "9th gup" to 2,
     "8th gup" to 3,
@@ -5816,6 +5950,7 @@ private fun rankLevelFor(rank: String): Int {
 
 private fun rankLabelForLevel(level: Int): String {
     return when (level) {
+        0 -> "TTLD"
         1 -> "1st Gup"
         2 -> "2nd Gup"
         3 -> "3rd Gup"
@@ -5826,7 +5961,7 @@ private fun rankLabelForLevel(level: Int): String {
         8 -> "8th Gup"
         9 -> "9th Gup"
         10 -> "10th Gup"
-        0 -> "Cho Dan Bo"
+        11 -> "Cho Dan Bo"
         -1 -> "Cho Dan"
         -2 -> "E Dan"
         -3 -> "Sam Dan"
@@ -5836,6 +5971,7 @@ private fun rankLabelForLevel(level: Int): String {
 
 private fun allRankLabels(): List<String> {
     return listOf(
+        "TTLD",
         "1st Gup",
         "2nd Gup",
         "3rd Gup",

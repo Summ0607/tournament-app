@@ -72,139 +72,75 @@ The app's responsibilities are scoped to the **live-event operational phase**. I
 
 ## 3 — Core Screens & Activities
 
-The app is organized around six primary screens. Navigation flows linearly from setup through to match completion, though the Ring Dashboard serves as the persistent hub volunteers return to between tasks.
+`MainActivity` is the launcher and owns the current production workflow. The app is effectively a single Compose-driven control board with layered screens and dialogs rather than a set of loosely coupled activities. A separate `ringcheckin/RingCheckInActivity` still exists in the codebase, but it is not the launcher and is not the primary path used by the current app flow.
 
-  
-    
+### 3.1 — Launch / Server Connection Screen
 
-### 3.1 — Server Connection / Setup Screen
-
-The **first screen** a volunteer sees on launch. Its sole purpose is to establish connectivity to the tournament-server before any operational screens are accessible. Volunteers enter the server's LAN IP address and port (e.g., `192.168.1.100:3000`).
+The first UI shown by `MainActivity` when the app has not yet connected to a ring. Volunteers can switch between DNS and IPv4 modes, edit the server address, and retry the connection.
 
 **Key responsibilities:**
 
-    
-- Provide text input fields for server IP address and port number, pre-populated with sensible defaults or the last-used values.
-    
-- On "Connect" tap, validate input format and perform a connectivity test against a known server endpoint (e.g., `GET /api/rings` or `/health`).
-    
-- On success: navigate to the Ring Selection screen.
-    
-- On failure: display a clear, human-readable error message with a retry option. Do not crash or leave the volunteer stranded.
-    
-- Persist the last-used server address (IP + port) in `SharedPreferences` so volunteers do not need to re-enter it on every launch.
-
-  
-    
+- Validate the server address based on the selected mode.
+- Probe `GET /api/health` before loading ring configuration.
+- Fetch available ring slots from `GET /api/rings/config?tabletLabel=...`.
+- Persist the selected mode plus the last DNS name / IP address in `SharedPreferences`.
+- Show a clear failure message and allow retry without restarting the app.
 
 ### 3.2 — Ring Selection Screen
 
-Displays the list of available rings fetched from the server. The volunteer selects their assigned ring to proceed to the Ring Dashboard.
+Once the server is reachable, the launch screen turns into a ring picker. Rings are rendered as a selectable grid keyed by ring label, with unavailable rings visually disabled.
 
 **Key responsibilities:**
 
-    
-- Fetch ring list from `GET /api/rings` on the server.
-    
-- Display each ring's label (e.g., "Ring 1", "Ring A") and its current phase (Scheduled / In Progress / Complete), ideally with a visual phase indicator.
-    
-- Navigate to the Ring Dashboard for the selected ring on tap.
-    
-- Handle edge cases: empty ring list (server not yet configured), network error, or server returning an unexpected shape.
+- Render each ring label and availability/status text.
+- Let the volunteer select a ring from the grid.
+- Connect the selected ring via `POST /api/rings/:ringId/request-group`.
+- Handle the empty-ring state when the server reports no configured rings.
 
-  
-    
+### 3.3 — Check-In / Control Board
 
-### 3.3 — Ring Dashboard (Main Operational Screen)
-
-The **primary working screen** for a volunteer during the event. Volunteers spend the majority of their time on this screen, navigating out to Check-In or Score Entry as needed and returning here after each task. This screen must always reflect the current server state.
+This is the main operational screen after a ring is connected. It shows the active group banner, checked-in count, entrant summary, judge-count toggle, assistance controls, reconnect controls, and the next competition action.
 
 **Key responsibilities:**
 
-    
-- Display the currently assigned group name, division name, and competitor count for the ring.
-    
-- Show the ring's current phase (Scheduled / In Progress / Complete) with a clear visual indicator.
-    
-- Display the upcoming group queue so volunteers can anticipate what comes next.
-    
-- Provide navigation controls to Check-In and Score Entry screens.
-    
-- Provide a phase-advance control (e.g., "Start Group", "Complete Group") that POSTs to the server.
-    
-- Implement a polling loop (default 5-second interval) to refresh ring state from `GET /api/rings/:ringId`.
-    
-- Display an offline / reconnecting banner when the LAN connection cannot be reached.
-    
-- Display incoming broadcast announcements from the head table (fetched via polling).
-    
-- Provide access to the Alert / Assistance screen.
+- Display the loaded group name and ring label.
+- Track competitor check-in state locally in memory.
+- Toggle sparring opt-out status for competitors.
+- Offer assistance actions and reconnect actions while assigned to a ring.
+- Advance into the scoring flows when a group is loaded.
+- Keep the screen alive with periodic heartbeat calls and reconnect handling.
 
-  
-    
+### 3.4 — Weapons Scoring Screen
 
-### 3.4 — Competitor Check-In Screen (RingCheckInActivity)
-
-Allows the volunteer to confirm which competitors are physically present at the ring before a match begins. This screen must make it fast and error-resistant to check in a list of competitors by tapping.
+Local scoring flow for weapons/hyungs-style forms judging. Judges enter numeric scores per competitor, the app computes totals, and tie-break dialogs are used when needed.
 
 **Key responsibilities:**
 
-    
-- Fetch and display the competitor list for the current group.
-    
-- Provide a tap-to-toggle check-in control for each competitor (Present / Absent).
-    
-- Allow marking a competitor as Scratch or Walkover from a contextual control.
-    
-- Visually distinguish Present / Absent / Scratch states clearly (color, icon, or label — not color alone).
-    
-- Show check-in progress summary (e.g., "4 of 6 checked in").
-    
-- Block match start if the minimum check-in threshold has not been met, or allow a volunteer override with an explicit confirmation step.
-    
-- On submission: POST check-in state to `POST /api/rings/:ringId/checkin`.
+- Accept 3-judge or 5-judge score entry.
+- Drop high/low scores when applicable.
+- Finalize placements with tie-break resolution.
+- Capture judge-choice tie-breaks when a second pass is required.
 
-  
-    
+### 3.5 — Hyungs Scoring Screen
 
-### 3.5 — Score Entry Screen
-
-Presented after check-in is complete. Supports the scoring modes configured on the server. The screen layout adapts to the active scoring mode for the current group's division.
+Same scoring engine as weapons, but with the hyungs catalog and related placement flow.
 
 **Key responsibilities:**
 
-    
-- Display the current match participants (red corner vs. blue corner, or sequential for kata/forms).
-    
-- Provide scoring controls appropriate to the mode: numeric point entry for point-based sparring; flag-raise buttons for flag-based sparring.
-    
-- Display running totals or current point differentials.
-    
-- Require an explicit confirmation step (e.g., "Submit Score?" dialog) before final submission to prevent accidental entry.
-    
-- On confirmation: POST result to `POST /api/rings/:ringId/score`.
-    
-- Disable or lock the entry form after an outcome has been decided for a match to prevent re-submission.
+- Reuse the same numeric scoring and placement logic.
+- Support tie-break recovery and re-finalization.
+- Preserve per-competitor score state in memory for the current session.
 
-  
-    
+### 3.6 — Sparring Bracket / Overall Awards / Assistance
 
-### 3.6 — Alert / Assistance Screen
-
-Allows the volunteer to send a structured alert to the head table. Alert types mirror those defined on the server. This screen also surfaces incoming messages from the head table.
+Sparring is handled as a local bracket workflow with bout dialogs, winner progression, and an overall awards screen that compiles review lines and completion packets. Assistance is a modal dialog that posts medical/arbitrator/general requests and can also clear an existing request.
 
 **Key responsibilities:**
 
-    
-- Present a selection of alert types: Score Dispute, Medical Hold, Division Complete, Other.
-    
-- Provide an optional free-text notes field for additional context.
-    
-- On send: POST to `POST /api/rings/:ringId/alert` and display a confirmation acknowledgment to the volunteer.
-    
-- Poll for incoming broadcast announcements from the head table via `GET /api/rings/:ringId/announcements` and display them as a dismissible banner on the Ring Dashboard.
-    
-- Allow the volunteer to view sent alert history for the current session.
+- Build and render a single-elimination sparring bracket.
+- Open bout dialogs, record winners, and advance rounds.
+- Generate the final round packet, PDF/PNG summary, and local receipt files.
+- Submit and clear assistance requests for the current ring.
 
 ---
 
@@ -213,48 +149,14 @@ Allows the volunteer to send a structured alert to the head table. Alert types m
 
 ## 4 — Data Model (Local & Server-Synced)
 
-The app does not maintain a local database. All entities below are **in-memory representations** populated by API calls to the tournament-server. The server is the authoritative source of truth. The only data persisted locally is the server address in `SharedPreferences`.
+The app keeps competition state in memory and persists only a few durable artifacts on disk. `SharedPreferences` stores the last-used server connection details; completed division packets, PDFs, PNGs, and standings live under `files/TournamentScoringApp/Results`.
 
-    
-- 
-      ServerConfig
-      Persisted in SharedPreferences. Stores the volunteer's last-used server connection details.
-      ip: String  |  port: Int  |  lastConnectedAt: Long (epoch ms)
-    
-
-    
-- 
-      RingState
-      Reflects the current state of a single ring as returned by the server. Refreshed on every poll cycle.
-      ringId: String  |  ringLabel: String  |  phase: Enum(scheduled, in-progress, complete)  |  currentGroupId: String?  |  currentGroupName: String?  |  queue: List<String>  |  assistanceType: String?  |  assistanceRequestedAt: Long?
-    
-
-    
-- 
-      Group
-      Represents a competition group assigned to a ring. Populated from the server when the volunteer navigates to Check-In.
-      groupId: String  |  groupName: String  |  divisionName: String  |  competitors: List<Competitor>
-    
-
-    
-- 
-      Competitor
-      A single registered competitor within a group. checkedIn and scratchStatus are local-only fields managed by the volunteer during the Check-In flow and POSTed to the server on submission.
-      competitorId: String  |  firstName: String  |  lastName: String  |  beltRank: String  |  ageGroup: String  |  gender: String  |  school: String  |  checkedIn: Boolean [local]  |  scratchStatus: Enum(none, scratch, walkover) [local]
-    
-
-    
-- 
-      MatchResult
-      Constructed in the Score Entry screen and POSTed to the server. Not persisted locally after submission.
-      matchId: String?  |  redCornerCompetitorId: String  |  blueCornerCompetitorId: String  |  redScore: Int  |  blueScore: Int  |  scoringMode: String  |  outcome: Enum(win, loss, bye, DQ, walkover)  |  submittedAt: Long
-    
-
-    
-- 
-      Alert
-      Represents an assistance request sent from the ring to the head table. Constructed in the Alert screen and POSTed to the server.
-      alertType: Enum(dispute, medical, division-complete, other)  |  ringId: String  |  notes: String?  |  sentAt: Long
+- `ServerConnectionConfig` stores the current connection mode plus the last DNS name / IP address.
+- `RemoteGroup`, `RemoteCompetitor`, `RingAssignment`, and `RingOption` model server responses during group requests and ring selection.
+- `GroupBanner` tracks the currently loaded group shown in the header.
+- `Competitor`, `Division`, `CompetitionEntry`, and the scoring maps in `MainActivity` hold the live in-memory tournament workflow.
+- `SparringBoutProgress`, `PlacementFinalizeState`, `PendingTieBreak`, and `SparringBoutAssessment` hold transient scoring state for the current session.
+- Completed division artifacts are written locally so the app can rebuild championship standings and reopen prior results without the server.
     
 
 ---
@@ -264,22 +166,22 @@ The app does not maintain a local database. All entities below are **in-memory r
 
 ## 5 — API Integration Points
 
-The app communicates exclusively with the tournament-server over HTTP on the local LAN. No cloud services, no internet connectivity required. All requests use the base URL configured on the Connection screen. The poll interval for refresh endpoints defaults to **5 seconds** and should be configurable without a code change (e.g., via a build config constant or in-app setting).
+The app talks to the tournament server over HTTP on the venue LAN. The current code uses these endpoints:
 
 | Method | Endpoint | Used By | Purpose |
 | --- | --- | --- | --- |
-| GET | /api/rings | Ring Selection, Ring Dashboard | Fetch all rings and their current state. Used on Ring Selection screen and as a connectivity test on Setup. |
-| GET | /api/rings/:ringId | Ring Dashboard (poll) | Fetch a single ring's current state. Called on the poll loop to refresh phase, group, queue, and announcement data. |
-| GET | /api/groups/:groupId | Check-In Screen | Fetch the full competitor list for the current group before check-in begins. |
-| POST | /api/rings/:ringId/checkin | Check-In Screen | Submit final check-in status (present, absent, scratch, walkover) for all competitors in the current group. |
-| POST | /api/rings/:ringId/phase | Ring Dashboard | Advance the ring phase: scheduled → in-progress → complete. |
-| POST | /api/rings/:ringId/score | Score Entry Screen | Submit a completed match result including scores, outcome, and scoring mode. |
-| POST | /api/rings/:ringId/alert | Alert / Assistance Screen | Send a structured assistance request (dispute, medical, division complete, other) with optional notes to the head table. |
-| GET | /api/rings/:ringId/announcements | Ring Dashboard (poll) | Poll for broadcast announcements sent from the head table to this ring. Displayed as a dismissible banner. |
+| GET | `/api/health` | Launch / server config | Connectivity probe before loading ring options. |
+| GET | `/api/rings/config?tabletLabel=...` | Launch / ring selection | Fetch ring slots and availability for the tablet. |
+| POST | `/api/rings/:ringId/request-group` | Ring connect | Bind the tablet to a ring and receive the active group. |
+| POST | `/api/rings/:ringId/heartbeat` | Connected workflow | Keep the server informed of the tablet's phase and label. |
+| POST | `/api/rings/:ringId/complete` | Overall awards / completion | Upload the completed division packet and advance to the next group. |
+| POST | `/api/rings/:ringId/assistance` | Assistance dialog | Request medical/arbitrator/general assistance. |
+| POST | `/api/rings/:ringId/assistance/clear` | Assistance dialog | Clear the current assistance request. |
+| GET | `/api/version` | Update check | Compare the server app version to the installed client. |
+| GET | `/download-app` | Update flow | Download the updated APK when a newer version is available. |
 
-> **Polling vs. Real-Time Push**
-> 
-The app currently uses HTTP polling on a timer for real-time updates (both ring state and announcements). A WebSocket or Server-Sent Events connection would reduce latency and server load. This is an open design question — see Section 8. The poll interval should be tunable without a code deployment.
+Refresh behavior is not a generic ring-state poll; the app refreshes launch availability while disconnected, sends heartbeats while assigned, and retries completion while waiting for the next group.
+
 
 ---
 
@@ -288,22 +190,15 @@ The app currently uses HTTP polling on a timer for real-time updates (both ring 
 
 ## 6 — Integration with the Server-Side System
 
-The Tournament Scoring App is a **pure REST client**. It holds no authoritative state of its own. All ring state, group data, competitor records, match results, and alert history are owned and persisted by the tournament-server. The app reads server state, presents it to volunteers, and writes back user actions via REST calls.
+The app is not a strict thin client. It uses the server for ring assignment requests, heartbeats, assistance, completion, and update checks, while the competition workflow itself lives in memory on the client.
 
 **Implications of this architecture:**
 
-    
-- **Crash recovery:** If the app is closed, crashes, or the tablet is rebooted mid-event, relaunching and reconnecting to the server restores the full current state within one poll cycle. No in-progress data is lost because no authoritative data is held locally.
-    
-- **Multi-device consistency:** Multiple tablets viewing the same ring will see consistent state because all reads originate from the same server. There is no client-side state that could diverge.
-    
-- **LAN drop handling:** If the network connection is interrupted, the app must surface a clear offline / reconnecting indicator and must not queue writes silently. The policy for handling mid-submission network drops is an open question — see Section 8.
-    
-- **No local database required:** Because the server is the source of truth, the app does not need SQLite or Room. All data structures are in-memory for the duration of a session.
+- A reconnect restores the ring assignment and active group, but local scoring/check-in state stays in the app.
+- Completed division packets are persisted locally so prior results can be reopened after a restart.
+- Network failures are surfaced in the UI with reconnect messaging; the app does not silently queue arbitrary writes.
 
-> **Companion Document Reference**
-> 
-For full details on the server's data model, route definitions, ring state machine, alert schema, and admin web interface, refer to the *Tournament Management System — Server-Side High-Level Design*. That document and this one together constitute the complete system HLD.
+For server-side route details and ring assignment logic, refer to the server HLD.
 
 ---
 
@@ -312,40 +207,12 @@ For full details on the server's data model, route definitions, ring state machi
 
 ## 7 — Non-Functional Requirements
 
-    
-- 
-      Availability
-      The app must function on the venue LAN with no internet connectivity at any time. If the LAN connection drops, the app must transition to a visible offline state — displaying a reconnecting indicator — and must not crash, blank out, or silently discard work. Operations must resume automatically when connectivity is restored without requiring the volunteer to restart the app.
-    
-
-    
-- 
-      Performance
-      Ring state must reflect server-side changes within 2–3 seconds under normal LAN conditions (polling interval ≤ 5 seconds plus round-trip time). Check-in and score submission requests must acknowledge (200 OK or equivalent) within 1 second on a stable LAN. The UI must not block or freeze during background network operations — all HTTP calls must be made off the main thread.
-    
-
-    
-- 
-      Usability
-      The app must be operable by a non-technical adult volunteer after no more than five minutes of orientation. All interactive touch targets must be large enough for reliable finger tapping on a tablet (minimum 48dp recommended). The three most common tasks — check in a competitor, submit a score, send an alert — must each be completable in three taps or fewer from the Ring Dashboard. Text must be legible at arm's length on a tablet screen without zooming.
-    
-
-    
-- 
-      Compatibility
-      The application targets Android tablets. It must work correctly and without layout degradation on both 8-inch and 10-inch tablet form factors. The minimum API level has not yet been confirmed (see Section 8) and should be set based on the actual tablet hardware available at events.
-    
-
-    
-- 
-      Security
-      The app does not implement its own authentication or role enforcement in the current design. Access control relies on physical security — only authorized volunteers hold the event tablets. This is explicitly acknowledged as a gap. Future versions may require per-volunteer authentication before accessing a ring. See Section 8 for the open question on authentication hardening.
-    
-
-    
-- 
-      Recoverability
-      If the app crashes mid-match or mid-check-in, relaunching the app and reconnecting to the server must restore the full current ring state within one refresh cycle. No in-progress scoring or check-in data that has already been submitted to the server should be lost. Local-only state (e.g., partially completed check-in not yet submitted) is non-recoverable by design — the volunteer must re-enter it.
+- **Availability:** The app stays usable on the venue LAN without internet access and shows reconnect status when the server drops.
+- **Performance:** HTTP calls run off the main thread; the code uses explicit connect/read timeouts and coroutine-based background work.
+- **Usability:** The UI adapts to compact and wide tablet layouts, with larger control surfaces for scoring and check-in.
+- **Compatibility:** `minSdk` is 26 and the app targets modern Android tablets.
+- **Security:** No authentication or role enforcement exists yet.
+- **Recoverability:** Completed division artifacts are saved locally so prior results can be reopened after a restart.
     
 
 ---
@@ -355,60 +222,13 @@ For full details on the server's data model, route definitions, ring state machi
 
 ## 8 — Open Questions & Decisions
 
-    
-- 
-      OPEN
-      Real-time update mechanism
-      The app currently polls `GET /api/rings/:ringId` on a configurable timer (default 5 seconds). A WebSocket or Server-Sent Events (SSE) connection to the tournament-server would reduce update latency and eliminate unnecessary polling load. This would require server-side changes to add a WS or SSE endpoint. Decision pending; polling is a workable interim solution.
-    
-
-    
-- 
-      OPEN
-      Authentication & role enforcement
-      No login mechanism or role check exists in the app currently. Any user who can reach the server on the LAN can take any action. Future versions may require volunteers to authenticate (e.g., PIN, QR code, or credential) before accessing a ring. The server would need to support session tokens or a similar mechanism. Decision pending; physical access control is the current mitigation.
-    
-
-    
-- 
-      OPEN
-      Scoring modes supported in app UI
-      Point-based sparring is the primary confirmed scoring mode. Flag-based sparring and kata/forms scoring have been identified as future modes but the app UI for those screens has not been designed. The extent of scoring mode support needed at the first live event must be confirmed with the tournament director. This affects scope of the Score Entry screen (Section 3.5).
-    
-
-    
-- 
-      OPEN
-      Minimum Android API level
-      Not yet confirmed. The minimum API level should be determined by the oldest Android OS version present on the tablet hardware that will be used at actual events. Setting it too low adds maintenance burden; setting it too high may exclude available hardware.
-    
-
-    
-- 
-      OPEN
-      Offline write queue policy
-      If the LAN connection drops mid-submission (score, check-in, or alert), should the app: (a) queue the write locally and retry automatically on reconnect, or (b) surface an error, discard the in-flight request, and require the volunteer to resubmit? Option (a) is safer for data integrity but more complex to implement correctly. Option (b) is simpler but places burden on the volunteer at a stressful moment. Policy not yet decided.
-    
-
-    
-- 
-      RESOLVED
-      Language: Kotlin confirmed
-      The application is written in Kotlin. Java interop is available but new code should be Kotlin-first.
-    
-
-    
-- 
-      RESOLVED
-      Network architecture: LAN-only, HTTP REST
-      The app communicates with the tournament-server over the venue LAN via standard HTTP REST calls. No cloud services, no internet dependency. The server base URL is user-configurable at startup.
-    
-
-    
-- 
-      RESOLVED
-      Persistence strategy: server is source of truth
-      The app holds only in-memory state derived from server API responses. The only local persistence is the server address (IP + port) stored in SharedPreferences. No local database (SQLite/Room) is required or planned.
+- **OPEN:** Authentication / role enforcement. No login or tablet-user validation is implemented.
+- **OPEN:** Whether the remaining ring-assignment workflow should stay client-driven or move more of it onto the server.
+- **OPEN:** Whether live announcements or richer server push should be added later.
+- **RESOLVED:** Kotlin is the implementation language.
+- **RESOLVED:** The app is LAN-only and uses HTTP.
+- **RESOLVED:** Connection settings are persisted in `SharedPreferences`.
+- **RESOLVED:** Local results are written to app files; no SQLite/Room database is used.
     
 
 ---
@@ -418,162 +238,43 @@ For full details on the server's data model, route definitions, ring state machi
 
 ## 9 — Comprehensive Component Checklist
 
-    **Legend:**   ✅ Complete / Confirmed from code review    🔄 In Progress    ☐ Not Started
+**Legend:** ✅ Complete / Confirmed from code review · 🔄 In Progress · ☐ Not Started
 
-  Server Connection / Setup (Section 3.1)
+### Server Connection / Launch
 
-    
-- ☐ IP/port input screen with validation
-      
+- ✅ DNS/IP mode selection, validation, and saved defaults
+- ✅ Connectivity probe via `GET /api/health`
+- ✅ Ring configuration fetch via `GET /api/rings/config`
+- ✅ Last-used server settings persisted in `SharedPreferences`
+- ✅ Ring request-group flow via `POST /api/rings/:ringId/request-group`
+- 🔄 Live ring-state dashboard / server push is not implemented yet
 
-        
-- ☐ Text fields for server IP and port with sensible defaults
-        
-- ☐ "Connect" button triggers ping to `GET /api/rings` or `/health` endpoint
-        
-- ☐ Success: navigate to Ring Selection; failure: show error message with retry
-        
-- ☐ Persist last-used address in SharedPreferences
-        
-- ✅ Base URL configurable (confirmed from prior code review)
-      
+### Check-In / Control Board
 
-    
+- ✅ Check-in list, tap-to-toggle status, and sparring opt-out
+- ✅ Checked-in count and entrant summary
+- ✅ Assistance button and reconnect handling
+- 🔄 No server POST for check-in state in the current MainActivity flow
 
-  Ring Selection (Section 3.2)
+### Scoring / Awards
 
-    
-- ☐ Fetch and display ring list from server
-      
+- ✅ Weapons scoring screen with judge entry and tie-break handling
+- ✅ Hyungs scoring screen with judge entry and tie-break handling
+- ✅ Sparring bracket, bout dialog, and winner progression
+- ✅ Overall awards screen, packet generation, and local receipt persistence
+- 🔄 No server POST for score submission in the current MainActivity flow
 
-        
-- ✅ `GET /api/rings` endpoint exists on server
-        
-- ☐ Display ring labels, count, and current phase on selection screen
-        
-- ☐ Navigate to Ring Dashboard on ring tap
-        
-- ☐ Handle empty ring list (server not yet configured)
-      
+### Assistance / Updates
 
-    
+- ✅ Medical / arbitrator / general assistance requests and clear action
+- ✅ Version check plus APK download/install flow
+- ☐ Announcements banner and sent-assistance history
 
-  Ring Dashboard (Section 3.3)
+### Tests
 
-    
-- 🔄 Ring state display (current group, phase, queue)
-      
-
-        
-- ✅ Server provides phase, currentGroupId, currentGroupName, queue in ring state
-        
-- ☐ Display group name and competitor count on dashboard
-        
-- ☐ Display current phase with visual indicator
-        
-- ☐ Implement poll loop (default 5-second interval)
-        
-- ☐ Show offline / reconnecting banner when LAN is unreachable
-      
-
-    
-
-  Competitor Check-In (Section 3.4 — RingCheckInActivity)
-
-    
-- 🔄 Check-in UI and state management
-      
-
-        
-- ✅ `RingCheckInActivity.kt` exists in codebase
-        
-- ☐ Display competitor list with tap-to-check-in toggle
-        
-- ☐ Distinguish present / absent / scratch states visually
-        
-- ☐ Show check-in progress (X of N checked in)
-        
-- ☐ Block or warn if match started without minimum check-ins
-        
-- ☐ POST check-in state to server on submission
-      
-
-    
-
-  Score Entry (Section 3.5)
-
-    
-- ☐ Score entry interface by scoring mode
-      
-
-        
-- ☐ Build score entry screen for point-based sparring (numeric input)
-        
-- ☐ Build score entry screen for flag-based sparring (flag raise buttons)
-        
-- ☐ Confirmation step before final score submission
-        
-- ☐ POST `/api/rings/:ringId/score` on confirm
-        
-- ☐ Disable re-submission after outcome is decided
-      
-
-    
-
-  Alert / Assistance (Section 3.6)
-
-    
-- 🔄 Alert sending and receiving
-      
-
-        
-- ✅ `assistanceType` and `assistanceRequestedAt` fields confirmed on server
-        
-- ☐ Build alert type selection UI (dispute, medical, division complete, other)
-        
-- ☐ Optional notes text field
-        
-- ☐ POST `/api/rings/:ringId/alert` on send
-        
-- ☐ Display confirmation toast / message on successful send
-        
-- ☐ Poll for incoming head table announcements and display as banner
-      
-
-    
-
-  Testing & Quality (all not started)
-
-    
-- ☐ Unit tests for local data mapping (server JSON → app data model)
-      
-
-        
-- ☐ Test RingState deserialization from all known server response shapes
-        
-- ☐ Test Competitor check-in state transitions (absent → present → scratch)
-      
-
-    
-    
-- ☐ Integration tests for API calls
-      
-
-        
-- ☐ Mock server responses for all key endpoints
-        
-- ☐ Test error handling: 404, 500, and network timeout
-      
-
-    
-    
-- ☐ UI / usability test with non-technical volunteers on tablet hardware
-      
-
-        
-- ☐ Test check-in, score entry, and alert flows end to end on device
-        
-- ☐ Verify all touch targets are reachable on 8-inch and 10-inch tablets
+- ✅ Engine and scoring logic unit tests in `ExampleUnitTest`
+- ✅ Basic instrumentation smoke test in `ExampleInstrumentedTest`
+- ☐ UI / integration tests for launcher, check-in, scoring, and assistance flows
       
 
     
@@ -587,4 +288,4 @@ For full details on the server's data model, route definitions, ring state machi
 
 | Version | Date | Author | Notes |
 | --- | --- | --- | --- |
-| 0.1 | 2026-09-18 | Scott | Initial HLD draft for Android client. All sections written; checklist items unchecked except where confirmed from prior code review (base URL configuration, GET /api/rings server endpoint, RingCheckInActivity.kt, assistanceType/assistanceRequestedAt server fields). |
+| 0.1 | 2026-09-18 | Scott | Initial HLD draft for Android client; checklist updated to reflect the current MainActivity flow, local scoring workflow, update flow, and existing test coverage. |
