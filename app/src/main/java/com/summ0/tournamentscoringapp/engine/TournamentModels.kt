@@ -1,5 +1,7 @@
 package com.summ0.tournamentscoringapp.engine
 
+import kotlin.math.roundToInt
+
 enum class HyungDiscipline {
     HYUNGS,
     WEAPONS
@@ -159,4 +161,219 @@ data class SparringTournamentResult(
     val rounds: List<SparringRoundResult>,
     val champion: Competitor?,
     val bracketSize: Int
+)
+
+internal enum class CompetitionScreen {
+    CHECK_IN,
+    WEAPONS_SCORING,
+    HYUNGS_SCORING,
+    SPARRING_BRACKET,
+    OVERALL_AWARDS
+}
+
+data class PlacementFinalizeState(
+    val labels: Map<String, String> = emptyMap(),
+    val tieBreakDetails: Map<String, String> = emptyMap(),
+    val message: String? = null
+)
+
+data class PendingTieBreak(
+    val discipline: HyungDiscipline,
+    val competitorIds: List<String>,
+    val judgeCount: Int,
+    val groupKey: String
+)
+
+data class PlacementCandidate(
+    val competitor: Competitor,
+    val scores: List<Double>,
+    val total: Double,
+    val judgeCount: Int
+)
+
+data class TieResolution(
+    val orderedCandidates: List<PlacementCandidate>,
+    val tieBreakDetails: Map<String, String>
+)
+
+sealed interface PlacementFinalizeResult {
+    data class Completed(
+        val labels: Map<String, String>,
+        val tieBreakDetails: Map<String, String>
+    ) : PlacementFinalizeResult
+
+    data class NeedsTieBreak(
+        val pendingLabels: Map<String, String>,
+        val request: PendingTieBreak
+    ) : PlacementFinalizeResult
+
+    data class Incomplete(val message: String) : PlacementFinalizeResult
+}
+
+data class ActiveSparringBout(
+    val roundIndex: Int,
+    val boutIndex: Int,
+    val bout: BracketSheetBout
+)
+
+data class SparringBoutProgress(
+    val bluePoints: Int = 0,
+    val redPoints: Int = 0,
+    val blueWarnings: Int = 0,
+    val redWarnings: Int = 0,
+    val elapsedSeconds: Int = 0,
+    val winnerId: String? = null,
+    val outcomeLabel: String = ""
+)
+
+data class SparringBoutAssessment(
+    val blueAdjustedScore: Int,
+    val redAdjustedScore: Int,
+    val blueDisqualified: Boolean,
+    val redDisqualified: Boolean,
+    val winner: Competitor?,
+    val outcomeLabel: String
+)
+
+data class RemoteCompetitor(
+    val id: String,
+    val name: String,
+    val studio: String,
+    val rank: String,
+    val age: Int,
+    val heightInInches: Int
+)
+
+data class RemoteGroup(
+    val groupId: String,
+    val name: String,
+    val ageRange: IntRange,
+    val rankRange: IntRange,
+    val rankRangeLabel: String,
+    val matNumber: Int,
+    val competitors: List<RemoteCompetitor>
+)
+
+data class RemoteGroupFetchResult(
+    val group: RemoteGroup? = null,
+    val errorMessage: String? = null
+)
+
+data class RingAssignment(
+    val ringId: String,
+    val ringLabel: String,
+    val serverBaseUrl: String,
+    val currentGroup: RemoteGroup?,
+    val currentPhase: String = "",
+    val phasePlan: String = "",
+    val queuedGroupIds: List<String>,
+    val completedGroupIds: List<String>
+)
+
+data class RingAssignmentFetchResult(
+    val assignment: RingAssignment? = null,
+    val errorMessage: String? = null
+)
+
+data class RingOption(
+    val ringId: String,
+    val ringLabel: String,
+    val isAvailable: Boolean,
+    val statusLabel: String
+)
+
+data class RingConfigFetchResult(
+    val serverBaseUrl: String? = null,
+    val rings: List<RingOption> = emptyList(),
+    val errorMessage: String? = null
+)
+
+data class RingGridCell(
+    val letter: String,
+    val number: Int,
+    val ring: RingOption?
+)
+
+data class JsonFetchResult(
+    val root: org.json.JSONObject? = null,
+    val errorMessage: String? = null
+)
+
+data class HttpProbeResult(
+    val ok: Boolean,
+    val errorMessage: String? = null
+)
+
+enum class ServerConnectionMode {
+    DNS,
+    IP
+}
+
+data class ServerConnectionConfig(
+    val mode: ServerConnectionMode,
+    val lastDnsName: String,
+    val lastServerAddress: String
+)
+
+data class GroupBanner(
+    val groupId: String = "",
+    val details: String = "",
+    val statusText: String = ""
+) {
+    val isLoaded: Boolean get() = groupId.isNotEmpty()
+    val displayId: String get() = when {
+        groupId.isEmpty() && statusText.isNotEmpty() -> statusText
+        groupId.startsWith("group-") -> "Group ${groupId.removePrefix("group-")}"
+        groupId.isNotEmpty() -> groupId
+        else -> "? No Group Loaded"
+    }
+}
+
+data class ParsedRankRange(
+    val range: IntRange,
+    val label: String
+)
+
+data class HeartbeatProgressSnapshot(
+    val completedCount: Int,
+    val totalCount: Int
+) {
+    val percent: Int
+        get() = if (totalCount <= 0) {
+            0
+        } else {
+            ((completedCount.coerceAtMost(totalCount).toDouble() / totalCount.toDouble()) * 100.0)
+                .roundToInt()
+                .coerceIn(0, 100)
+        }
+}
+
+data class OverallAwardsSummary(
+    val weapons: List<Pair<String, Competitor?>>,
+    val hyungs: List<Pair<String, Competitor?>>,
+    val sparring: List<Pair<String, Competitor?>>
+)
+
+data class SignatureEntry(
+    val name: String = "",
+    val dan: String = ""
+)
+
+data class BracketParticipant(
+    val competitor: Competitor?,
+    val sourceLabel: String? = null
+)
+
+data class BracketSheetBout(
+    val boutNumber: Int,
+    val blue: BracketParticipant,
+    val red: BracketParticipant,
+    val actualBye: Boolean,
+    val showOnSheet: Boolean
+)
+
+data class BracketSheetRound(
+    val label: String,
+    val slots: List<BracketSheetBout>,
+    val slotHeightMultiplier: Int
 )
