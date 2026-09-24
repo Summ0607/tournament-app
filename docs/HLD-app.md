@@ -103,10 +103,6 @@ The domain model supports competitors with registered, checked-in, and no-show s
 - `GroupBanner` state can be serialized with `groupBannerSaver`.
 - Heartbeat progress uses completed and total counts and produces a rounded, bounded percentage from 0 through 100.
 
-**Legacy activity**
-
-`ringcheckin/RingCheckInActivity` is an older view-based activity still present in the codebase. It has four hard-coded sample competitors, permits adding a local name, shows check-in/sparring toggles, and launches `MainActivity` into hyungs scoring. It is separate from the Compose-driven launcher workflow and should be treated as legacy or prototype code unless explicitly retained.
-
 ### 3.3 — Forms scoring: weapons and hyungs
 
 Weapons and hyungs share a forms-scoring model through `HyungDiscipline` and `HyungScoreRow`.
@@ -320,7 +316,6 @@ The following integrations remain part of the intended application workflow but 
 - Define authentication and role enforcement before deployments beyond a trusted controlled LAN.
 - Decide whether authoritative scoring/check-in data must be synchronized server-side rather than retained primarily in local UI state.
 - Decide whether live server push, periodic assignment refresh, announcements, or audit logging are required for tournament operations.
-- Review the legacy `RingCheckInActivity` and either remove it, isolate it as a prototype, or formally support it.
 
 ---
 
