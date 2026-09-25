@@ -221,3 +221,155 @@ suspend fun fetchServerVersionCode(serverBaseUrl: String): Int {
         0
     }
 }
+
+data class DivisionResultSubmissionRingAssignment(
+    val ringId: String,
+    val currentGroupId: String? = null,
+    val queuedGroupIds: List<String> = emptyList(),
+    val completedGroupIds: List<String> = emptyList(),
+    val rawJson: JSONObject = JSONObject()
+)
+
+data class DivisionResultSubmissionAcceptedResponse(
+    val ok: Boolean,
+    val status: String,
+    val serverRecordId: String,
+    val submissionId: String,
+    val receivedAt: String,
+    val ringAssignment: DivisionResultSubmissionRingAssignment?,
+    val rawJson: JSONObject
+)
+
+data class DivisionResultSubmissionRejectedResponse(
+    val statusCode: Int,
+    val errors: List<String>,
+    val rawBody: String
+)
+
+data class DivisionResultSubmissionNetworkFailure(
+    val message: String,
+    val statusCode: Int? = null
+)
+
+sealed interface DivisionResultSubmissionResult {
+    data class Accepted(val response: DivisionResultSubmissionAcceptedResponse) : DivisionResultSubmissionResult
+    data class Rejected(val response: DivisionResultSubmissionRejectedResponse) : DivisionResultSubmissionResult
+    data class NetworkFailure(val failure: DivisionResultSubmissionNetworkFailure) : DivisionResultSubmissionResult
+}
+
+suspend fun submitDivisionResult(
+    serverBaseUrl: String,
+    ringId: String,
+    packetJson: JSONObject
+): DivisionResultSubmissionResult {
+    return submitDivisionResult(serverBaseUrl, ringId, packetJson.toString())
+}
+
+suspend fun submitDivisionResult(
+    serverBaseUrl: String,
+    ringId: String,
+    packetJsonText: String
+): DivisionResultSubmissionResult = withContext(Dispatchers.IO) {
+    val urlString = "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/complete"
+    try {
+        val url = URL(urlString)
+        val connection = url.openConnection() as HttpURLConnection
+        connection.requestMethod = "POST"
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 10_000
+        connection.doOutput = true
+        connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+        connection.outputStream.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.write(packetJsonText)
+        }
+        connection.connect()
+
+        val responseCode = connection.responseCode
+        val responseBody = (if (responseCode in 200..299) connection.inputStream else connection.errorStream)
+            ?.bufferedReader()
+            ?.use { it.readText() }
+            .orEmpty()
+
+        when {
+            responseCode in 200..299 -> {
+                val root = JSONObject(responseBody.ifBlank { "{}" })
+                DivisionResultSubmissionResult.Accepted(
+                    DivisionResultSubmissionAcceptedResponse(
+                        ok = root.optBoolean("ok", true),
+                        status = root.optString("status", "accepted"),
+                        serverRecordId = root.optString("serverRecordId", ""),
+                        submissionId = root.optString("submissionId", JSONObject(packetJsonText).optString("submissionId", "")),
+                        receivedAt = root.optString("receivedAt", ""),
+                        ringAssignment = root.optJSONObject("ringAssignment")?.let { ring ->
+                            DivisionResultSubmissionRingAssignment(
+                                ringId = ring.optString("ringId", ringId),
+                                currentGroupId = ring.optString("currentGroupId", "").trim().ifBlank { null },
+                                queuedGroupIds = ring.optJSONArray("queuedGroupIds")?.let { array ->
+                                    buildList {
+                                        for (index in 0 until array.length()) {
+                                            val value = array.optString(index, "").trim()
+                                            if (value.isNotEmpty()) add(value)
+                                        }
+                                    }
+                                } ?: emptyList(),
+                                completedGroupIds = ring.optJSONArray("completedGroupIds")?.let { array ->
+                                    buildList {
+                                        for (index in 0 until array.length()) {
+                                            val value = array.optString(index, "").trim()
+                                            if (value.isNotEmpty()) add(value)
+                                        }
+                                    }
+                                } ?: emptyList(),
+                                rawJson = ring
+                            )
+                        },
+                        rawJson = root
+                    )
+                )
+            }
+            responseCode in 400..499 -> {
+                val root = runCatching { JSONObject(responseBody) }.getOrNull()
+                val errors = when {
+                    root == null -> listOf(responseBody.ifBlank { "Server returned HTTP $responseCode" })
+                    root.optJSONArray("errors") != null -> {
+                        val array = root.optJSONArray("errors")!!
+                        buildList {
+                            for (index in 0 until array.length()) {
+                                val value = array.optString(index, "").trim()
+                                if (value.isNotEmpty()) add(value)
+                            }
+                        }
+                    }
+                    root.optString("message", "").isNotBlank() -> listOf(root.optString("message"))
+                    root.optString("error", "").isNotBlank() -> listOf(root.optString("error"))
+                    else -> listOf(root.toString())
+                }
+                DivisionResultSubmissionResult.Rejected(
+                    DivisionResultSubmissionRejectedResponse(
+                        statusCode = responseCode,
+                        errors = errors,
+                        rawBody = responseBody
+                    )
+                )
+            }
+            else -> {
+                DivisionResultSubmissionResult.NetworkFailure(
+                    DivisionResultSubmissionNetworkFailure(
+                        message = if (responseBody.isNotBlank()) {
+                            "Server returned HTTP $responseCode: $responseBody"
+                        } else {
+                            "Server returned HTTP $responseCode"
+                        },
+                        statusCode = responseCode
+                    )
+                )
+            }
+        }
+    } catch (exception: Exception) {
+        DivisionResultSubmissionResult.NetworkFailure(
+            DivisionResultSubmissionNetworkFailure(
+                message = exception.message ?: "Unknown network error"
+            )
+        )
+    }
+}

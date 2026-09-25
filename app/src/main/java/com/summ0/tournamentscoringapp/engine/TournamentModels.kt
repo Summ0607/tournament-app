@@ -356,7 +356,9 @@ data class OverallAwardsSummary(
 
 data class SignatureEntry(
     val name: String = "",
-    val dan: String = ""
+    val dan: String = "",
+    val role: String = "",
+    val signedAt: String = ""
 )
 
 data class BracketParticipant(
