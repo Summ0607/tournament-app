@@ -15,72 +15,72 @@ object TournamentEngine {
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "10th Gup",
+            rank = "G10",
             emptyHandForms = listOf("Sae Kye Hyung II Bu"),
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "9th Gup",
+            rank = "G9",
             emptyHandForms = listOf("Sae Kye Hyung II Bu", "E Bu"),
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "8th Gup",
+            rank = "G8",
             emptyHandForms = listOf("Sae Kye Hyung E Bu", "Sam Bu"),
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "7th Gup",
+            rank = "G7",
             emptyHandForms = listOf("Sae Kye Hyung Sam Bu", "Pyung Ahn Cho Dan"),
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "6th Gup",
+            rank = "G6",
             emptyHandForms = listOf("Pyung Ahn Cho Dan", "E Dan"),
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "5th Gup",
+            rank = "G5",
             emptyHandForms = listOf("Pyung Ahn E Dan", "Sam Dan"),
             weaponForms = emptyList()
         ),
         RankFormEligibility(
-            rank = "4th Gup",
+            rank = "G4",
             emptyHandForms = listOf("Pyung Ahn Sam Dan", "Sah Dan"),
             weaponForms = listOf("Bong Hyung II Bu")
         ),
         RankFormEligibility(
-            rank = "3rd Gup",
+            rank = "G3",
             emptyHandForms = listOf("Pyung Ahn Sah Dan", "Oh Dan"),
             weaponForms = listOf("Bong Hyung II Bu")
         ),
         RankFormEligibility(
-            rank = "2nd Gup",
+            rank = "G2",
             emptyHandForms = listOf("Pyung Ahn Oh Dan", "Bassai"),
             weaponForms = listOf("Bong Hyung II Bu")
         ),
         RankFormEligibility(
-            rank = "1st Gup",
+            rank = "G1",
             emptyHandForms = listOf("Bassai", "Naihanchi Cho Dan"),
             weaponForms = listOf("Bong Hyung II Bu", "Bong Hyung E Bu")
         ),
         RankFormEligibility(
-            rank = "Cho Dan Bo",
+            rank = "CDB",
             emptyHandForms = listOf("Naihanchi Cho Dan", "Sip Soo"),
             weaponForms = listOf("Bong Hyung E Bu")
         ),
         RankFormEligibility(
-            rank = "Cho Dan",
+            rank = "D1",
             emptyHandForms = listOf("Sip Soo", "Naihanchi E Dan"),
             weaponForms = listOf("Bong Hyung E Bu", "Bong Hyung Sam Bu")
         ),
         RankFormEligibility(
-            rank = "E Dan",
+            rank = "D2",
             emptyHandForms = listOf("Naihanchi E Dan", "Sam Dan", "Jin Do"),
             weaponForms = listOf("Bong Hyung Sam Bu", "Dan Gum", "Ki Cho Jang Gum Hyung")
         ),
         RankFormEligibility(
-            rank = "Sam Dan",
+            rank = "D3",
             emptyHandForms = listOf("Naihanchi Sam Dan", "Jin Do", "Ro Hai", "Kong Sang Koon"),
             weaponForms = listOf("Dan Gum", "Ki Cho Jang Gum Hyung", "Jung Koop Jang Gum Hyung")
         )
@@ -499,19 +499,19 @@ object TournamentEngine {
             "c13" to 11
         )
         val rankById = mapOf(
-            "c1" to "1st Gup",
-            "c2" to "2nd Gup",
-            "c3" to "1st Gup",
-            "c4" to "2nd Gup",
-            "c5" to "1st Gup",
-            "c6" to "2nd Gup",
-            "c7" to "1st Gup",
-            "c8" to "2nd Gup",
-            "c9" to "1st Gup",
-            "c10" to "2nd Gup",
-            "c11" to "1st Gup",
-            "c12" to "2nd Gup",
-            "c13" to "1st Gup"
+            "c1" to "G1",
+            "c2" to "G2",
+            "c3" to "G1",
+            "c4" to "G2",
+            "c5" to "G1",
+            "c6" to "G2",
+            "c7" to "G1",
+            "c8" to "G2",
+            "c9" to "G1",
+            "c10" to "G2",
+            "c11" to "G1",
+            "c12" to "G2",
+            "c13" to "G1"
         )
         val division = Division(
             id = "sample-division",
@@ -527,7 +527,7 @@ object TournamentEngine {
                 name = namesById.getValue(competitorId),
                 studio = "VFMA",
                 rank = rankById.getValue(competitorId),
-                rankLevel = if (rankById.getValue(competitorId) == "1st Gup") 1 else 2,
+                rankLevel = if (rankById.getValue(competitorId) == "G1") 1 else 2,
                 age = ageById.getValue(competitorId),
                 heightInInches = 58 + random.nextInt(11)
             )

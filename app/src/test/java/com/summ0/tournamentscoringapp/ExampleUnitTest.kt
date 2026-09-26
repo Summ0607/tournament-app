@@ -28,11 +28,11 @@ class ExampleUnitTest {
         )
         assertEquals(
             listOf("Pyung Ahn Sah Dan", "Oh Dan"),
-            TournamentEngine.getAllowedHyungForms("3rd Gup", HyungDiscipline.HYUNGS)
+            TournamentEngine.getAllowedHyungForms("G3", HyungDiscipline.HYUNGS)
         )
         assertEquals(
             listOf("Naihanchi Sam Dan", "Jin Do", "Ro Hai", "Kong Sang Koon"),
-            TournamentEngine.getAllowedHyungForms("Sam Dan", HyungDiscipline.HYUNGS)
+            TournamentEngine.getAllowedHyungForms("D3", HyungDiscipline.HYUNGS)
         )
     }
 
@@ -43,15 +43,15 @@ class ExampleUnitTest {
         )
         assertEquals(
             listOf("Bong Hyung II Bu"),
-            TournamentEngine.getAllowedHyungForms("4th Gup", HyungDiscipline.WEAPONS)
+            TournamentEngine.getAllowedHyungForms("G4", HyungDiscipline.WEAPONS)
         )
         assertEquals(
             listOf("Bong Hyung E Bu", "Bong Hyung Sam Bu"),
-            TournamentEngine.getAllowedHyungForms("Cho Dan", HyungDiscipline.WEAPONS)
+            TournamentEngine.getAllowedHyungForms("D1", HyungDiscipline.WEAPONS)
         )
         assertEquals(
             listOf("Dan Gum", "Ki Cho Jang Gum Hyung", "Jung Koop Jang Gum Hyung"),
-            TournamentEngine.getAllowedHyungForms("Sam Dan", HyungDiscipline.WEAPONS)
+            TournamentEngine.getAllowedHyungForms("D3", HyungDiscipline.WEAPONS)
         )
     }
 
@@ -643,7 +643,7 @@ class ExampleUnitTest {
             id = id,
             name = name,
             studio = "Summit MA",
-            rank = "3rd Gup",
+            rank = "G3",
             rankLevel = 3,
             age = 12,
             heightInInches = heightInInches

@@ -112,6 +112,7 @@ import com.summ0.tournamentscoringapp.engine.Division
 import com.summ0.tournamentscoringapp.engine.HyungDiscipline
 import com.summ0.tournamentscoringapp.engine.*
 import com.summ0.tournamentscoringapp.engine.TournamentEngine
+import com.summ0.tournamentscoringapp.RankFormatter
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -2009,7 +2010,7 @@ private fun CompetitorFormDialog(
     val isEditMode = initialCompetitor != null
     val canEditName = !isEditMode || isManualCompetitor(initialCompetitor)
     val validRanks = remember(division.rankRange) {
-        allRankLabels().filter { rankLevelFor(it) in division.rankRange }
+        allRankCodes().filter { rankLevelFor(it) in division.rankRange }
     }
     val requiresAgeInput = remember(division.ageRange) { division.ageRange.last < 18 }
     var name by rememberSaveable(initialCompetitor?.id) {
@@ -2079,6 +2080,7 @@ private fun CompetitorFormDialog(
                     label = "Rank",
                     selectedValue = rank,
                     options = validRanks,
+                    displayValue = { RankFormatter.formatForDisplay(it) },
                     onSelect = { rank = it },
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -2425,7 +2427,7 @@ private fun WeaponsScoringSheetCard(
                 Text("Eligible forms by rank:")
                 rankForms.forEach { (rank, forms) ->
                     val formsLabel = if (forms.isEmpty()) "No weapons forms configured." else forms.joinToString(", ")
-                    Text("$rank: $formsLabel")
+                    Text("${RankFormatter.formatForDisplay(rank)}: $formsLabel")
                 }
             }
             placementState.message?.let {
@@ -2498,7 +2500,7 @@ private fun WeaponScoreRow(
     val focusRequesters = remember(judgeCount) { List(judgeCount) { FocusRequester() } }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(competitor.name, modifier = Modifier.width(180.dp))
-        Text(competitor.rank, modifier = Modifier.width(90.dp))
+        Text(RankFormatter.formatForDisplay(competitor.rank), modifier = Modifier.width(90.dp))
         repeat(judgeCount) { judgeIndex ->
             OutlinedTextField(
                 value = inputs[judgeIndex],
@@ -2678,7 +2680,7 @@ private fun HyungScoreRow(
     val focusRequesters = remember(judgeCount) { List(judgeCount) { FocusRequester() } }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(competitor.name, modifier = Modifier.width(180.dp))
-        Text(competitor.rank, modifier = Modifier.width(90.dp))
+        Text(RankFormatter.formatForDisplay(competitor.rank), modifier = Modifier.width(90.dp))
         repeat(judgeCount) { judgeIndex ->
             OutlinedTextField(
                 value = inputs[judgeIndex],
@@ -3215,7 +3217,7 @@ private fun categoryBandForAge(age: Int): String {
 }
 
 private fun categoryBandForRank(rank: String): String {
-    return if (normalizeRank(rank) == "ttld" || rankLevelFor(rank) > 0) "Gup" else "Black Belt"
+    return if (normalizeRank(rank) == "TTLD" || rankLevelFor(rank) > 0) "Gup" else "Black Belt"
 }
 
 private fun championshipCategoryForCompetitor(age: Int, rank: String): String {
@@ -3733,7 +3735,7 @@ private fun OverallAwardsScreen(
                             tieBreakDetail = weaponsTieBreakDetailsByCompetitorId[competitor.id]
                         ).ifBlank { "N/A" }
                         val place = weaponsPlacementsByCompetitorId[competitor.id] ?: "N/A"
-                        Text("${competitor.name} (${competitor.rank}) | ${if (judges.isBlank()) "No scores" else judges} | Total $total | $place")
+                        Text("${competitor.name} (${RankFormatter.formatForDisplay(competitor.rank)}) | ${if (judges.isBlank()) "No scores" else judges} | Total $total | $place")
                     }
                 }
 
@@ -3751,7 +3753,7 @@ private fun OverallAwardsScreen(
                             tieBreakDetail = hyungsTieBreakDetailsByCompetitorId[competitor.id]
                         ).ifBlank { "N/A" }
                         val place = hyungsPlacementsByCompetitorId[competitor.id] ?: "N/A"
-                        Text("${competitor.name} (${competitor.rank}) | ${if (judges.isBlank()) "No scores" else judges} | Total $total | $place")
+                        Text("${competitor.name} (${RankFormatter.formatForDisplay(competitor.rank)}) | ${if (judges.isBlank()) "No scores" else judges} | Total $total | $place")
                     }
                 }
 
@@ -4154,7 +4156,7 @@ private fun buildSummarySheetLines(
     divisionCompetitors.forEach { competitor ->
         val weaponsScores = formatScorePairs(weaponsScoresByCompetitor[competitor.id] ?: emptyList())
         val hyungsScores = formatScorePairs(hyungsScoresByCompetitor[competitor.id] ?: emptyList())
-        lines += "${competitor.name} (${competitor.rank})"
+        lines += "${competitor.name} (${RankFormatter.formatForDisplay(competitor.rank)})"
         lines += "  Weapons: $weaponsScores | Place: ${weaponsPlacementsByCompetitorId[competitor.id].orEmpty().ifBlank { "N/A" }}"
         lines += "  Hyungs: $hyungsScores | Place: ${hyungsPlacementsByCompetitorId[competitor.id].orEmpty().ifBlank { "N/A" }}"
         val weaponsDetail = weaponsTieBreakDetailsByCompetitorId[competitor.id].orEmpty()
@@ -5118,91 +5120,44 @@ private fun calculateScoreTotal(scoreInputs: List<String>): Double? {
     return TournamentEngine.calculateHyungTotal(scores)
 }
 
-private val rankDivisionLevels = mapOf(
-    "ttld" to 0,
-    "1st gup" to 1,
-    "2nd gup" to 2,
-    "3rd gup" to 3,
-    "4th gup" to 4,
-    "5th gup" to 5,
-    "6th gup" to 6,
-    "7th gup" to 7,
-    "8th gup" to 8,
-    "9th gup" to 9,
-    "10th gup" to 10,
-    "cdb" to 11,
-    "cho dan bo" to 11,
-    "cho dan" to -1,
-    "e dan" to -2,
-    "sam dan" to -3
-)
-
 private val rankSortOrder = mapOf(
-    "ttld" to 0,
-    "10th gup" to 1,
-    "9th gup" to 2,
-    "8th gup" to 3,
-    "7th gup" to 4,
-    "6th gup" to 5,
-    "5th gup" to 6,
-    "4th gup" to 7,
-    "3rd gup" to 8,
-    "2nd gup" to 9,
-    "1st gup" to 10,
-    "cdb" to 11,
-    "cho dan bo" to 11,
-    "cho dan" to 12,
-    "e dan" to 13,
-    "sam dan" to 14
+    "TTLD" to 0,
+    "G10" to 1,
+    "G9" to 2,
+    "G8" to 3,
+    "G7" to 4,
+    "G6" to 5,
+    "G5" to 6,
+    "G4" to 7,
+    "G3" to 8,
+    "G2" to 9,
+    "G1" to 10,
+    "CDB" to 11,
+    "D1" to 12,
+    "D2" to 13,
+    "D3" to 14,
+    "D4" to 15,
+    "D5" to 16,
+    "D6" to 17,
+    "D7" to 18,
+    "D8" to 19,
+    "D9" to 20
 )
 
 private fun normalizeRank(rank: String): String {
-    return rank.trim().lowercase()
+    return RankFormatter.normalizeCode(rank)
 }
 
 fun rankLevelFor(rank: String): Int {
-    return rankDivisionLevels[normalizeRank(rank)] ?: Int.MAX_VALUE
+    return RankFormatter.rankLevelFor(rank)
 }
 
 fun rankLabelForLevel(level: Int): String {
-    return when (level) {
-        0 -> "TTLD"
-        1 -> "1st Gup"
-        2 -> "2nd Gup"
-        3 -> "3rd Gup"
-        4 -> "4th Gup"
-        5 -> "5th Gup"
-        6 -> "6th Gup"
-        7 -> "7th Gup"
-        8 -> "8th Gup"
-        9 -> "9th Gup"
-        10 -> "10th Gup"
-        11 -> "Cho Dan Bo"
-        -1 -> "Cho Dan"
-        -2 -> "E Dan"
-        -3 -> "Sam Dan"
-        else -> level.toString()
-    }
+    return RankFormatter.formatForDisplay(RankFormatter.rankCodeForLevel(level))
 }
 
-private fun allRankLabels(): List<String> {
-    return listOf(
-        "TTLD",
-        "1st Gup",
-        "2nd Gup",
-        "3rd Gup",
-        "4th Gup",
-        "5th Gup",
-        "6th Gup",
-        "7th Gup",
-        "8th Gup",
-        "9th Gup",
-        "10th Gup",
-        "Cho Dan Bo",
-        "Cho Dan",
-        "E Dan",
-        "Sam Dan"
-    )
+private fun allRankCodes(): List<String> {
+    return RankFormatter.allRankCodes()
 }
 
 @Composable
@@ -5210,13 +5165,14 @@ private fun DropdownSelector(
     label: String,
     selectedValue: String,
     options: List<String>,
+    displayValue: (String) -> String = { it },
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
         OutlinedTextField(
-            value = selectedValue,
+            value = displayValue(selectedValue),
             onValueChange = {},
             readOnly = true,
             label = { Text(label) },
@@ -5238,7 +5194,7 @@ private fun DropdownSelector(
         ) {
             options.forEach { option ->
                 DropdownMenuItem(
-                    text = { Text(option) },
+                    text = { Text(displayValue(option)) },
                     onClick = {
                         onSelect(option)
                         expanded = false
@@ -5259,7 +5215,7 @@ private fun validateCompetitorForGroup(
         return "Age ${competitor.age} is outside this division range (${division.ageRange.first}-${division.ageRange.last})."
     }
     if (competitor.rankLevel !in division.rankRange) {
-        return "Rank ${competitor.rank} is outside this division range."
+        return "Rank ${RankFormatter.formatForDisplay(competitor.rank)} is outside this division range."
     }
     if (competitor.heightInInches <= 0) {
         return "Height must be greater than zero."
@@ -5549,7 +5505,7 @@ private fun CompetitorCheckInCard(
             verticalArrangement = Arrangement.spacedBy(if (dense) 2.dp else 3.dp)
         ) {
             Text(text = competitor.name, fontWeight = FontWeight.Bold, fontSize = if (dense) 13.sp else 14.sp)
-            Text(text = "Rank: ${competitor.rank} · Age: ${competitor.age}", fontSize = if (dense) 12.sp else 13.sp)
+            Text(text = "Rank: ${RankFormatter.formatForDisplay(competitor.rank)} · Age: ${competitor.age}", fontSize = if (dense) 12.sp else 13.sp)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(if (dense) 6.dp else 8.dp)

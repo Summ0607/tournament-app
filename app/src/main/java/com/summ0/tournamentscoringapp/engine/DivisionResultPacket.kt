@@ -1,6 +1,7 @@
 package com.summ0.tournamentscoringapp.engine
 
 import com.summ0.tournamentscoringapp.BuildConfig
+import com.summ0.tournamentscoringapp.RankFormatter
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
@@ -159,7 +160,7 @@ object DivisionResultPacketBuilder {
                 name = competitor.name,
                 studio = competitor.studio,
                 rankCode = rankCode,
-                rankLabel = competitor.rank,
+                rankLabel = RankFormatter.formatForDisplay(competitor.rank),
                 age = competitor.age,
                 heightInInches = competitor.heightInInches,
                 checkInStatus = competitor.checkInStatus.name,

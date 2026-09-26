@@ -2,6 +2,7 @@ package com.summ0.tournamentscoringapp.engine
 
 import com.summ0.tournamentscoringapp.rankLabelForLevel
 import com.summ0.tournamentscoringapp.rankLevelFor
+import com.summ0.tournamentscoringapp.RankFormatter
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,7 +21,8 @@ fun parseRankRange(root: JSONObject, rawCompetitors: JSONArray): ParsedRankRange
 
     val competitorRankLevels = mutableListOf<Int>()
     for (index in 0 until rawCompetitors.length()) {
-        val rankLevel = rankLevelFor(rawCompetitors.getJSONObject(index).optString("rank", ""))
+        val competitorJson = rawCompetitors.getJSONObject(index)
+        val rankLevel = rankLevelFor(competitorJson.optNonBlank("rankCode", "rank").orEmpty())
         if (rankLevel != Int.MAX_VALUE) {
             competitorRankLevels += rankLevel
         }
@@ -45,7 +47,7 @@ fun parseRankRange(root: JSONObject, rawCompetitors: JSONArray): ParsedRankRange
     }
 
     val label = when {
-        lowLabel != null && highLabel != null -> "$lowLabel - $highLabel"
+        lowLabel != null && highLabel != null -> "${RankFormatter.formatForDisplay(lowLabel)} - ${RankFormatter.formatForDisplay(highLabel)}"
         parsedRange.isEmpty() -> "0-0"
         else -> "${rankLabelForLevel(parsedRange.last)} - ${rankLabelForLevel(parsedRange.first)}"
     }
@@ -100,7 +102,7 @@ fun parseRemoteGroup(root: JSONObject): RemoteGroup {
             id = competitorId,
             name = competitorName,
             studio = studioName,
-            rank = competitorJson.optString("rank", "10th Gup"),
+            rank = competitorJson.optNonBlank("rankCode", "rank") ?: "G10",
             age = competitorJson.optInt("age", 18),
             heightInInches = competitorJson.optHeightInches()
         )

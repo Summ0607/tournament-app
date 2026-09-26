@@ -113,15 +113,15 @@ class DivisionResultPacketBuilderTest {
     @Test
     fun buildsNineCompetitorHyungsPacketWithNonMedalists() {
         val competitors = listOf(
-            baseCompetitor("competitor-1", "Alpha", "2nd Gup"),
-            baseCompetitor("competitor-2", "Bravo", "2nd Gup"),
-            baseCompetitor("competitor-3", "Charlie", "2nd Gup"),
-            baseCompetitor("competitor-4", "Delta", "2nd Gup"),
-            baseCompetitor("competitor-5", "Echo", "2nd Gup"),
-            baseCompetitor("competitor-6", "Foxtrot", "2nd Gup"),
-            baseCompetitor("competitor-7", "Golf", "2nd Gup"),
-            baseCompetitor("competitor-8", "Hotel", "2nd Gup"),
-            baseCompetitor("competitor-9", "India", "2nd Gup")
+            baseCompetitor("competitor-1", "Alpha", "G2"),
+            baseCompetitor("competitor-2", "Bravo", "G2"),
+            baseCompetitor("competitor-3", "Charlie", "G2"),
+            baseCompetitor("competitor-4", "Delta", "G2"),
+            baseCompetitor("competitor-5", "Echo", "G2"),
+            baseCompetitor("competitor-6", "Foxtrot", "G2"),
+            baseCompetitor("competitor-7", "Golf", "G2"),
+            baseCompetitor("competitor-8", "Hotel", "G2"),
+            baseCompetitor("competitor-9", "India", "G2")
         )
         val resultsById = mapOf(
             "competitor-7" to 88.4,
@@ -218,7 +218,7 @@ class DivisionResultPacketBuilderTest {
         val competitor = baseCompetitor(
             id = "competitor-1",
             name = "Alex Example",
-            rank = "2nd Gup"
+            rank = "G2"
         )
         return DivisionResultPacketBuildRequest(
             eventName = "spring-championship",
@@ -270,12 +270,12 @@ class DivisionResultPacketBuilderTest {
         val blue = baseCompetitor(
             id = "competitor-blue",
             name = "Blue Example",
-            rank = "2nd Gup"
+            rank = "G2"
         )
         val red = baseCompetitor(
             id = "competitor-red",
             name = "Red Example",
-            rank = "2nd Gup"
+            rank = "G2"
         )
         val normalBout = SparringBout(
             boutNumber = 2,
@@ -370,12 +370,12 @@ class DivisionResultPacketBuilderTest {
         val first = baseCompetitor(
             id = "competitor-1",
             name = "Alpha",
-            rank = "2nd Gup"
+            rank = "G2"
         )
         val second = baseCompetitor(
             id = "competitor-2",
             name = "Bravo",
-            rank = "2nd Gup"
+            rank = "G2"
         )
         return sampleRequest().copy(
             competitors = listOf(first, second),
