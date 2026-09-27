@@ -849,6 +849,23 @@ internal fun CheckInScreen(
         }
     }
 
+    // While connected but waiting for a group, poll so a newly queued group loads without reconnecting
+    LaunchedEffect(currentRingId, serverBaseUrl, currentGroupBanner.isLoaded) {
+        if (currentRingId.isNotBlank() && !currentGroupBanner.isLoaded) {
+            while (true) {
+                delay(5_000L)
+                val ringId = currentRingId
+                if (ringId.isBlank() || currentGroupBanner.isLoaded || isLoadingGroup || isCompletingGroup) continue
+                val currentUrl = "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/current"
+                val assignment = fetchRingAssignment(currentUrl).assignment ?: continue
+                if (assignment.currentGroup != null && !currentGroupBanner.isLoaded) {
+                    syncAssignmentFromServer(assignment = assignment, preserveLoadedGroup = true)
+                    remoteStatus = "${assignment.ringLabel} loaded ${assignment.currentGroup.groupId}."
+                }
+            }
+        }
+    }
+
     // Check for app updates when server URL is known
     LaunchedEffect(serverBaseUrl) {
         if (serverBaseUrl.isNotBlank()) {
