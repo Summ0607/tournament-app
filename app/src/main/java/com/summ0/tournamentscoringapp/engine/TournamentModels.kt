@@ -246,6 +246,8 @@ data class RemoteCompetitor(
 
 data class RemoteGroup(
     val groupId: String,
+    val groupDivisionNumber: Int? = null,
+    val groupDivisionName: String? = null,
     val name: String,
     val ageRange: IntRange,
     val rankRange: IntRange,
@@ -259,13 +261,37 @@ data class RemoteGroupFetchResult(
     val errorMessage: String? = null
 )
 
+data class PhaseTiming(
+    val name: String,
+    val startTime: String,
+    val endTime: String?,
+    val elapsed: String,
+    val estimated: String
+)
+
 data class RingAssignment(
     val ringId: String,
     val ringLabel: String,
     val serverBaseUrl: String,
+    val eventName: String = "",
+    val eventNameSource: String = "",
     val currentGroup: RemoteGroup?,
     val currentPhase: String = "",
     val phasePlan: String = "",
+    val currentPhaseName: String = "",
+    val currentPhaseStartTime: String = "",
+    val currentPhaseEndTime: String? = null,
+    val currentPhaseElapsed: String = "",
+    val currentPhaseEstimated: String = "",
+    val currentPhaseCompletedCount: Int = 0,
+    val currentPhaseTotalCount: Int = 0,
+    val sparringByeCount: Int = 0,
+    val sparringActualBoutCount: Int = 0,
+    val sparringCompletedBoutCount: Int = 0,
+    val ringElapsed: String = "",
+    val ringEstimated: String = "",
+    val ringPacePercent: Int = 0,
+    val phaseHistory: List<PhaseTiming> = emptyList(),
     val queuedGroupIds: List<String>,
     val completedGroupIds: List<String>
 )
@@ -316,17 +342,45 @@ data class ServerConnectionConfig(
 )
 
 data class GroupBanner(
-    val groupId: String = "",
-    val details: String = "",
+    val groupDivisionNumber: Int? = null,
+    val groupDivisionName: String? = null,
     val statusText: String = ""
 ) {
-    val isLoaded: Boolean get() = groupId.isNotEmpty()
+    val isLoaded: Boolean get() = groupDivisionNumber != null
     val displayId: String get() = when {
-        groupId.isEmpty() && statusText.isNotEmpty() -> statusText
-        groupId.startsWith("group-") -> "Group ${groupId.removePrefix("group-")}"
-        groupId.isNotEmpty() -> groupId
-        else -> "? No Group Loaded"
+        groupDivisionNumber != null -> {
+            val name = groupDivisionName?.trim().orEmpty()
+            if (name.isBlank()) "Division $groupDivisionNumber" else "Division $groupDivisionNumber: $name"
+        }
+        statusText.isNotEmpty() -> statusText
+        else -> "? No Division Loaded"
     }
+    val details: String get() = groupDivisionName.orEmpty()
+}
+
+fun parseDivisionNumberFromLegacyGroupId(groupId: String): Int? {
+    val match = Regex("\\d+").find(groupId) ?: return null
+    return match.value.toIntOrNull()
+}
+
+fun formatDivisionDisplayLabel(groupDivisionNumber: Int?, groupDivisionName: String?, statusText: String = ""): String {
+    val number = groupDivisionNumber?.takeIf { it > 0 }
+    val name = groupDivisionName?.trim().orEmpty()
+    return when {
+        number != null && name.isNotBlank() -> "Division $number: $name"
+        number != null -> "Division $number"
+        name.isNotBlank() -> name
+        statusText.isNotBlank() -> statusText
+        else -> "? No Division Loaded"
+    }
+}
+
+fun RemoteGroup.effectiveDivisionNumber(): Int? {
+    return groupDivisionNumber ?: parseDivisionNumberFromLegacyGroupId(groupId)
+}
+
+fun RemoteGroup.effectiveDivisionName(): String? {
+    return groupDivisionName?.trim()?.takeIf { it.isNotEmpty() } ?: name.trim().takeIf { it.isNotEmpty() }
 }
 
 data class ParsedRankRange(
@@ -356,7 +410,8 @@ data class OverallAwardsSummary(
 
 data class SignatureEntry(
     val name: String = "",
-    val dan: String = "",
+    val rank: String = "",
+    val number: String = "",
     val role: String = "",
     val signedAt: String = ""
 )

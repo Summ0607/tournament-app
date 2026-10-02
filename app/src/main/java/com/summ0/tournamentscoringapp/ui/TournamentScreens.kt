@@ -26,6 +26,7 @@ import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
 import java.time.Instant
+import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
@@ -153,41 +154,35 @@ private fun scoringHeartbeatProgress(
 
 private fun sparringHeartbeatProgress(
     round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
-    winnersByRound: Map<Int, Map<Int, Competitor>>
+    winnersByRound: Map<Int, Map<Int, Competitor>>,
+    competitorCount: Int
 ): HeartbeatProgressSnapshot {
-    val rounds = buildBracketSheetRounds(round0Bouts, winnersByRound)
-    var completed = 0
-    var total = 0
-    rounds.forEachIndexed { roundIndex, round ->
-        val roundWinners = winnersByRound[roundIndex] ?: emptyMap()
-        round.slots.forEachIndexed { boutIndex, bout ->
-            total += 1
-            if (selectedWinnerForDisplay(roundIndex, boutIndex, bout, roundWinners) != null) {
-                completed += 1
-            }
-        }
-    }
-    return heartbeatProgressSnapshot(completed, total)
+    val summary = buildSparringBracketSummary(round0Bouts, winnersByRound, competitorCount)
+    return heartbeatProgressSnapshot(summary.completedBoutCount, summary.actualBoutCount)
 }
 
 private fun awardsHeartbeatProgress(
     competitors: List<Competitor>,
     weaponsLabels: Map<String, String>,
+    weaponsScoresByCompetitor: Map<String, List<String>>,
     hyungsLabels: Map<String, String>,
+    hyungsScoresByCompetitor: Map<String, List<String>>,
     sparringWinners: Map<Int, Map<Int, Competitor>>,
     round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>
 ): HeartbeatProgressSnapshot {
     val awardsSummary = buildOverallAwardsSummary(
         competitors = competitors,
         weaponsLabels = weaponsLabels,
+        weaponsScoresByCompetitor = weaponsScoresByCompetitor,
         hyungsLabels = hyungsLabels,
+        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
         sparringWinners = sparringWinners,
         round0Bouts = round0Bouts
     )
     val placements = buildList {
-        addAll(awardsSummary.weapons)
-        addAll(awardsSummary.hyungs)
-        addAll(awardsSummary.sparring)
+        if (awardsSummary.weapons.isNotEmpty()) addAll(awardsSummary.weapons)
+        if (awardsSummary.hyungs.isNotEmpty()) addAll(awardsSummary.hyungs)
+        if (awardsSummary.sparring.isNotEmpty()) addAll(awardsSummary.sparring)
     }
     val completed = placements.count { it.second != null }
     return heartbeatProgressSnapshot(completed, placements.size)
@@ -202,6 +197,7 @@ private fun heartbeatProgressForPhase(
     hyungsScoresByCompetitor: Map<String, List<String>>,
     sparringRound0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
     sparringWinners: Map<Int, Map<Int, Competitor>>,
+    sparringCompetitorCount: Int,
     weaponsFinalizeState: PlacementFinalizeState,
     hyungsFinalizeState: PlacementFinalizeState
 ): HeartbeatProgressSnapshot {
@@ -209,11 +205,17 @@ private fun heartbeatProgressForPhase(
         "check-in", "setup" -> setupHeartbeatProgress(competitors)
         "weapons" -> scoringHeartbeatProgress(weaponsSheetCompetitors, weaponsScoresByCompetitor)
         "hyungs" -> scoringHeartbeatProgress(hyungsSheetCompetitors, hyungsScoresByCompetitor)
-        "sparring" -> sparringHeartbeatProgress(sparringRound0Bouts, sparringWinners)
+        "sparring" -> sparringHeartbeatProgress(
+            sparringRound0Bouts,
+            sparringWinners,
+            sparringCompetitorCount
+        )
         "awards" -> awardsHeartbeatProgress(
             competitors = competitors,
             weaponsLabels = weaponsFinalizeState.labels,
+            weaponsScoresByCompetitor = weaponsScoresByCompetitor,
             hyungsLabels = hyungsFinalizeState.labels,
+            hyungsScoresByCompetitor = hyungsScoresByCompetitor,
             sparringWinners = sparringWinners,
             round0Bouts = sparringRound0Bouts
         )
@@ -301,6 +303,7 @@ internal fun CheckInScreen(
     var showServerConfigDialog by remember { mutableStateOf(false) }
     var currentRingId by rememberSaveable { mutableStateOf("") }
     var currentRingLabel by rememberSaveable { mutableStateOf("") }
+    var currentRingAssignment by remember { mutableStateOf<RingAssignment?>(null) }
     val currentGroupBannerState = rememberSaveable(stateSaver = groupBannerSaver) { mutableStateOf(GroupBanner()) }
     val currentGroupBanner: GroupBanner = currentGroupBannerState.value
     var showAssistanceDialog by remember { mutableStateOf(false) }
@@ -369,6 +372,7 @@ internal fun CheckInScreen(
         hyungsScoresByCompetitor = hyungsScoresByCompetitor,
         sparringRound0Bouts = sparringRound0Bouts,
         sparringWinners = sparringWinners,
+        sparringCompetitorCount = sparringCompetitors.size,
         weaponsFinalizeState = weaponsFinalizeState,
         hyungsFinalizeState = hyungsFinalizeState
     )
@@ -402,15 +406,20 @@ internal fun CheckInScreen(
 
     fun applyLoadedGroup(group: RemoteGroup) {
         resetCompetitionState()
+        val divisionNumber = group.effectiveDivisionNumber()
+        val divisionName = group.effectiveDivisionName()
         activeDivision = Division(
-            id = group.groupId,
-            name = group.name,
+            id = divisionNumber?.toString().orEmpty(),
+            name = divisionName.orEmpty(),
             rankRange = group.rankRange,
             rankRangeLabel = group.rankRangeLabel,
             ageRange = group.ageRange
         )
         competitorsState.value = group.competitors.map { it.toCompetitor() }
-        currentGroupBannerState.value = GroupBanner(groupId = group.groupId, details = group.name)
+        currentGroupBannerState.value = GroupBanner(
+            groupDivisionNumber = divisionNumber,
+            groupDivisionName = divisionName
+        )
         controlBoardPhaseState.value = "check-in"
     }
 
@@ -428,6 +437,7 @@ internal fun CheckInScreen(
         competitorsState.value = emptyList()
         currentGroupBannerState.value = GroupBanner()
         controlBoardPhaseState.value = "check-in"
+        currentRingAssignment = null
         remoteStatus = "Unassigned"
     }
 
@@ -448,6 +458,7 @@ internal fun CheckInScreen(
         controlBoardPhaseState.value = "check-in"
         currentRingId = ""
         currentRingLabel = ""
+        currentRingAssignment = null
         selectedLaunchRingId = ""
         ringConnectionNeedsReconnect = false
         remoteStatus = message
@@ -593,22 +604,54 @@ internal fun CheckInScreen(
         }
     }
 
-    fun syncAssignmentFromServer(
+    suspend fun syncAssignmentFromServer(
         assignment: RingAssignment,
         preserveLoadedGroup: Boolean
     ) {
         serverBaseUrl = assignment.serverBaseUrl
         currentRingId = assignment.ringId
         currentRingLabel = assignment.ringLabel
+
+        val resolvedAssignment = if (assignment.eventName.isNotBlank()) {
+            assignment.copy(eventNameSource = "ring-assignment")
+        } else {
+            val activeEventResult = fetchActiveEventName(assignment.serverBaseUrl)
+            if (activeEventResult.eventName.isNotBlank()) {
+                assignment.copy(
+                    eventName = activeEventResult.eventName,
+                    eventNameSource = "active-event-api:${activeEventResult.source}"
+                )
+            } else {
+                Log.w(
+                    "CompleteRoundTrace",
+                    "Active event unresolved for ringId=${assignment.ringId} " +
+                        "status=${activeEventResult.httpStatusCode?.toString().orEmpty()} " +
+                        "body=${activeEventResult.responseBody.ifBlank { "<empty>" }}"
+                )
+                assignment.copy(eventNameSource = "active-event-api:unresolved")
+            }
+        }
+
+        currentRingAssignment = resolvedAssignment
+        Log.d(
+            COMPLETE_ROUND_TRACE_TAG,
+            "Ring assigned: ringId=${resolvedAssignment.ringId} " +
+                "eventNameSource=${resolvedAssignment.eventNameSource} " +
+                "eventName=${resolvedAssignment.eventName.ifBlank { "<unresolved>" }}"
+        )
         markRingConnectionHealthy()
 
-        val nextGroup = assignment.currentGroup
-        val currentGroupId = currentGroupBanner.groupId
+        val nextGroup = resolvedAssignment.currentGroup
+        val currentGroupDivisionNumber = currentGroupBanner.groupDivisionNumber
+        val currentGroupDivisionName = currentGroupBanner.groupDivisionName
         when {
             nextGroup != null && (!preserveLoadedGroup || !currentGroupBanner.isLoaded) -> {
                 applyLoadedGroup(nextGroup)
             }
-            nextGroup != null && currentGroupBanner.isLoaded && nextGroup.groupId != currentGroupId -> {
+            nextGroup != null && currentGroupBanner.isLoaded && (
+                nextGroup.effectiveDivisionNumber() != currentGroupDivisionNumber ||
+                    nextGroup.effectiveDivisionName() != currentGroupDivisionName
+                ) -> {
                 applyLoadedGroup(nextGroup)
             }
             nextGroup == null && !preserveLoadedGroup -> {
@@ -687,7 +730,7 @@ internal fun CheckInScreen(
     }
 
     fun completeCurrentGroup(
-        divisionPacket: JSONObject? = null,
+        request: DivisionResultPacketBuildRequest,
         snapshotBytes: ByteArray? = null,
         snapshotMimeType: String? = null
     ) {
@@ -700,47 +743,66 @@ internal fun CheckInScreen(
 
             isCompletingGroup = true
             remoteStatus = "Loading next group: building packet..."
-            val completeUrl = "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/complete"
-            remoteStatus = "Loading next group: preparing upload body..."
-            val uploadBody = divisionPacket
-            remoteStatus = "Loading next group: sending request..."
-            val fetchResult = fetchRingAssignment(completeUrl, "POST", uploadBody)
-            val assignment = fetchResult.assignment
-            if (assignment != null) {
-                remoteStatus = "Loading next group: saving results..."
-                markRingConnectionHealthy()
-                if (divisionPacket != null && snapshotBytes != null && snapshotMimeType != null) {
-                    persistDivisionPacketReceipt(
-                        context = appContext,
-                        divisionPacket = divisionPacket,
-                        snapshotBytes = snapshotBytes,
-                        snapshotMimeType = snapshotMimeType
+            val submissionResult = mainViewModel.finalizeAndSubmitResults(
+                serverBaseUrl = serverBaseUrl,
+                request = request
+            )
+            when (submissionResult) {
+                is DivisionResultSubmissionResult.Accepted -> {
+                    remoteStatus = "Loading next group: saving results..."
+                    markRingConnectionHealthy()
+                    if (snapshotBytes != null && snapshotMimeType != null) {
+                        val receiptPacket = serializeDivisionResultPacket(
+                            DivisionResultPacketBuilder.build(request)
+                        )
+                        persistDivisionPacketReceipt(
+                            context = appContext,
+                            divisionPacket = receiptPacket,
+                            snapshotBytes = snapshotBytes,
+                            snapshotMimeType = snapshotMimeType
+                        )
+                    }
+
+                    val refreshedAssignment = fetchRingAssignment(
+                        "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/current"
+                    ).assignment
+                    if (refreshedAssignment != null) {
+                        syncAssignmentFromServer(
+                            assignment = refreshedAssignment,
+                            preserveLoadedGroup = false
+                        )
+                        remoteStatus = refreshedAssignment.currentGroup?.let { nextGroup ->
+                            val nextLabel = formatDivisionDisplayLabel(
+                                nextGroup.effectiveDivisionNumber(),
+                                nextGroup.effectiveDivisionName()
+                            )
+                            if (nextGroup.competitors.isNotEmpty()) {
+                                "${refreshedAssignment.ringLabel} advanced to $nextLabel."
+                            } else {
+                                "${refreshedAssignment.ringLabel} is waiting for the next group."
+                            }
+                        } ?: "${refreshedAssignment.ringLabel} is waiting for the next group."
+                    } else {
+                        remoteStatus = "Results uploaded, but the next group could not be refreshed."
+                    }
+                    applyRingContactResult(
+                        sendRingHeartbeat(
+                            serverBaseUrl = serverBaseUrl,
+                            ringId = ringId,
+                            phase = controlBoardPhase,
+                            tabletLabel = tabletLabel,
+                            progress = currentHeartbeatProgress
+                        )
                     )
                 }
-                syncAssignmentFromServer(
-                    assignment = assignment,
-                    preserveLoadedGroup = false
-                )
-                remoteStatus = assignment.currentGroup?.let { nextGroup ->
-                    if (nextGroup.competitors.isNotEmpty()) {
-                        "${assignment.ringLabel} advanced to ${nextGroup.groupId}."
-                    } else {
-                        "${assignment.ringLabel} is waiting for the next group."
-                    }
-                } ?: "${assignment.ringLabel} is waiting for the next group."
-                applyRingContactResult(
-                    sendRingHeartbeat(
-                        serverBaseUrl = assignment.serverBaseUrl,
-                        ringId = assignment.ringId,
-                        phase = controlBoardPhase,
-                        tabletLabel = tabletLabel,
-                        progress = currentHeartbeatProgress
+                is DivisionResultSubmissionResult.Rejected -> {
+                    remoteStatus = "Result submission rejected: ${submissionResult.response.errors.joinToString("; ")}"
+                }
+                is DivisionResultSubmissionResult.NetworkFailure -> {
+                    markRingConnectionNeedsReconnect(
+                        "Connection lost. Reconnect Ring to restore contact."
                     )
-                )
-            } else {
-                markRingConnectionNeedsReconnect(
-                    "Connection lost. Reconnect Ring to restore contact."
-                )
+                }
             }
             isCompletingGroup = false
         }
@@ -805,7 +867,9 @@ internal fun CheckInScreen(
         currentScreen,
         currentRingId,
         serverBaseUrl,
-        currentGroupBanner.groupId,
+        currentGroupBanner.groupDivisionNumber,
+        currentGroupBanner.groupDivisionName,
+        currentGroupBanner.statusText,
         controlBoardPhase,
         currentHeartbeatProgress.completedCount,
         currentHeartbeatProgress.totalCount,
@@ -860,7 +924,13 @@ internal fun CheckInScreen(
                 val assignment = fetchRingAssignment(currentUrl).assignment ?: continue
                 if (assignment.currentGroup != null && !currentGroupBanner.isLoaded) {
                     syncAssignmentFromServer(assignment = assignment, preserveLoadedGroup = true)
-                    remoteStatus = "${assignment.ringLabel} loaded ${assignment.currentGroup.groupId}."
+                    val currentGroup = assignment.currentGroup
+                    remoteStatus = "${assignment.ringLabel} loaded ${
+                        formatDivisionDisplayLabel(
+                            currentGroup.effectiveDivisionNumber(),
+                            currentGroup.effectiveDivisionName()
+                        )
+                    }."
                 }
             }
         }
@@ -1210,14 +1280,21 @@ internal fun CheckInScreen(
         val overallAwards = buildOverallAwardsSummary(
             competitors = competitors,
             weaponsLabels = weaponsFinalizeState.labels,
+            weaponsScoresByCompetitor = weaponsScoresByCompetitor,
             hyungsLabels = hyungsFinalizeState.labels,
+            hyungsScoresByCompetitor = hyungsScoresByCompetitor,
             sparringWinners = sparringWinners,
             round0Bouts = sparringRound0Bouts
         )
         OverallAwardsScreen(
             groupBanner = currentGroupBanner,
-            divisionId = activeDivision.id.ifBlank { currentGroupBanner.groupId },
+            currentPhaseName = controlBoardPhase,
+            activeEventName = currentRingAssignment?.eventName.orEmpty(),
+            divisionId = activeDivision.id.ifBlank { currentGroupBanner.groupDivisionNumber?.toString().orEmpty() },
             divisionType = activeDivision.name.ifBlank { "Division" },
+            ringId = currentRingId,
+            ringLabel = currentRingLabel,
+            tabletLabel = tabletLabel,
             divisionCompetitors = competitors,
             groupSize = competitors.size,
             requiredJudgeCount = judgeCount,
@@ -1228,17 +1305,22 @@ internal fun CheckInScreen(
             weaponsScoresByCompetitor = weaponsScoresByCompetitor,
             weaponsPlacementsByCompetitorId = weaponsFinalizeState.labels,
             weaponsTieBreakDetailsByCompetitorId = weaponsFinalizeState.tieBreakDetails,
+            weaponsFinalizeState = weaponsFinalizeState,
             hyungsCompetitors = hyungsSheetCompetitors,
             hyungsScoresByCompetitor = hyungsScoresByCompetitor,
             hyungsPlacementsByCompetitorId = hyungsFinalizeState.labels,
             hyungsTieBreakDetailsByCompetitorId = hyungsFinalizeState.tieBreakDetails,
+            hyungsFinalizeState = hyungsFinalizeState,
+            sparringRound0Bouts = sparringRound0Bouts,
+            sparringWinners = sparringWinners,
+            sparringBoutProgress = sparringBoutProgress,
             sparringReviewLines = buildSparringReviewLines(
                 round0Bouts = sparringRound0Bouts,
                 winnersByRound = sparringWinners,
                 boutProgressByKey = sparringBoutProgress
             ),
-            onCompleteRound = { packet, snapshotBytes, snapshotMimeType ->
-                completeCurrentGroup(packet, snapshotBytes, snapshotMimeType)
+            onCompleteRound = { request, snapshotBytes, snapshotMimeType ->
+                completeCurrentGroup(request, snapshotBytes, snapshotMimeType)
             },
             onBackToSparring = { moveToScreen(CompetitionScreen.SPARRING_BRACKET) },
             onExit = { requestExitApp() }
@@ -1435,6 +1517,7 @@ internal fun CheckInScreen(
                             }
                         },
                         entrantsSummaryText = entrantsSummaryText,
+                        ringAssignment = currentRingAssignment,
                         dense = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1519,6 +1602,7 @@ internal fun CheckInScreen(
                             }
                         },
                         entrantsSummaryText = entrantsSummaryText,
+                        ringAssignment = currentRingAssignment,
                         dense = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1605,6 +1689,7 @@ internal fun CheckInScreen(
                             }
                         },
                         entrantsSummaryText = entrantsSummaryText,
+                        ringAssignment = currentRingAssignment,
                         dense = denseCheckInLayout,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1698,6 +1783,7 @@ private fun randomizeScoringSheetCompetitors(
 private fun CheckInHeaderCard(
     currentGroupBanner: GroupBanner,
     currentRingLabel: String,
+    ringAssignment: RingAssignment? = null,
     connectionStateHeadline: String,
     connectionStateBody: String,
     checkedInCount: Int,
@@ -1781,6 +1867,18 @@ private fun CheckInHeaderCard(
                 fontWeight = FontWeight.SemiBold,
                 fontSize = labelSize
             )
+            ringAssignment?.let { assignment ->
+                val paceLabel = ringPaceLabel(
+                    elapsed = assignment.ringElapsed,
+                    estimated = assignment.ringEstimated
+                )
+                if (paceLabel != null) {
+                    Text(
+                        text = "Ring Pace: $paceLabel",
+                        fontSize = bodySize
+                    )
+                }
+            }
             Row(
                 horizontalArrangement = Arrangement.spacedBy(if (dense) 8.dp else 12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -2029,7 +2127,7 @@ private fun CompetitorFormDialog(
     val validRanks = remember(division.rankRange) {
         allRankCodes().filter { rankLevelFor(it) in division.rankRange }
     }
-    val requiresAgeInput = remember(division.ageRange) { division.ageRange.last < 18 }
+    val requiresAgeInput = remember(division.ageRange) { division.ageRange != 0..0 }
     var name by rememberSaveable(initialCompetitor?.id) {
         mutableStateOf(initialCompetitor?.name ?: "")
     }
@@ -3227,9 +3325,10 @@ private fun packetDivisionId(packet: JSONObject): String {
 
 private fun categoryBandForAge(age: Int): String {
     return when {
-        age < 18 -> "Youth"
-        age <= 35 -> "Adult"
-        else -> "Senior"
+        age < 14 -> "Under 14"
+        age <= 17 -> "14-17"
+        age <= 35 -> "18-35"
+        else -> "36+"
     }
 }
 
@@ -3239,6 +3338,18 @@ private fun categoryBandForRank(rank: String): String {
 
 private fun championshipCategoryForCompetitor(age: Int, rank: String): String {
     return "${categoryBandForAge(age)} ${categoryBandForRank(rank)}"
+}
+
+private fun formatAgeRangeLabel(ageRange: IntRange): String {
+    return when {
+        ageRange == 0..0 -> "0-0"
+        ageRange.first == 0 && ageRange.last == 13 -> "Under 14"
+        ageRange.first == 14 && ageRange.last == 17 -> "14-17"
+        ageRange.first == 18 && ageRange.last == 35 -> "18-35"
+        ageRange.first == 36 && ageRange.last == Int.MAX_VALUE -> "36+"
+        ageRange.last == Int.MAX_VALUE -> "${ageRange.first}+"
+        else -> "${ageRange.first}-${ageRange.last}"
+    }
 }
 
 private fun jsonArrayContains(array: JSONArray, value: String): Boolean {
@@ -3540,14 +3651,6 @@ private fun BannerTitleStack(
             screenWidthDp < 840 -> 28.sp
             else -> 32.sp
         }
-        val detailsSize = when {
-            compact && screenWidthDp < 600 -> 16.sp
-            compact && screenWidthDp < 840 -> 20.sp
-            compact -> 22.sp
-            screenWidthDp < 600 -> 20.sp
-            screenWidthDp < 840 -> 26.sp
-            else -> 30.sp
-        }
         Text(
             text = screenTitle,
             textAlign = TextAlign.Center,
@@ -3560,14 +3663,6 @@ private fun BannerTitleStack(
             fontWeight = FontWeight.SemiBold,
             fontSize = groupSize
         )
-        if (group.isLoaded && group.details.isNotEmpty()) {
-            Text(
-                text = group.details,
-                textAlign = TextAlign.Center,
-                fontWeight = FontWeight.Normal,
-                fontSize = detailsSize
-            )
-        }
         if (showVersion) {
             Text(
                 text = appVersionLabel(),
@@ -3602,12 +3697,31 @@ internal fun formatSummaryPlacementLine(label: String, competitor: Competitor?):
 }
 
 private val signatureFontFamily = FontFamily.Cursive
+private val signatureRankOptions = listOf(
+    "4th Gup",
+    "3rd Gup",
+    "2nd Gup",
+    "1st Gup",
+    "CDB",
+    "Cho Dan",
+    "E Dan",
+    "Sam Dan",
+    "Sah Dan",
+    "Oh Dan",
+    "Yuk Dan"
+)
+private const val COMPLETE_ROUND_TRACE_TAG = "CompleteRoundTrace"
 
 @Composable
 private fun OverallAwardsScreen(
     groupBanner: GroupBanner,
+    currentPhaseName: String,
+    activeEventName: String,
     divisionId: String,
     divisionType: String,
+    ringId: String,
+    ringLabel: String,
+    tabletLabel: String,
     divisionCompetitors: List<Competitor>,
     groupSize: Int,
     requiredJudgeCount: Int,
@@ -3618,12 +3732,17 @@ private fun OverallAwardsScreen(
     weaponsScoresByCompetitor: Map<String, List<String>>,
     weaponsPlacementsByCompetitorId: Map<String, String>,
     weaponsTieBreakDetailsByCompetitorId: Map<String, String>,
+    weaponsFinalizeState: PlacementFinalizeState,
     hyungsCompetitors: List<Competitor>,
     hyungsScoresByCompetitor: Map<String, List<String>>,
     hyungsPlacementsByCompetitorId: Map<String, String>,
     hyungsTieBreakDetailsByCompetitorId: Map<String, String>,
+    hyungsFinalizeState: PlacementFinalizeState,
+    sparringRound0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
+    sparringWinners: Map<Int, Map<Int, Competitor>>,
+    sparringBoutProgress: Map<String, SparringBoutProgress>,
     sparringReviewLines: List<String>,
-    onCompleteRound: (JSONObject, ByteArray, String) -> Unit,
+    onCompleteRound: (DivisionResultPacketBuildRequest, ByteArray, String) -> Unit,
     onBackToSparring: () -> Unit,
     onExit: () -> Unit
 ) {
@@ -3635,10 +3754,10 @@ private fun OverallAwardsScreen(
     val requiredScorekeeperCount = if (onlyOneScorekeeperToday) 1 else 2
     val allSignaturesComplete = judgeSignatures
         .take(requiredJudgeCount)
-        .all { it.name.isNotBlank() && it.dan.isNotBlank() } &&
+        .all { isCompleteSignatureEntry(it) } &&
         listOf(scorekeeperSignature, timekeeperSignature)
             .take(requiredScorekeeperCount)
-            .all { it.name.isNotBlank() && it.dan.isNotBlank() }
+            .all { isCompleteSignatureEntry(it) }
 
     Column(
         modifier = Modifier
@@ -3652,20 +3771,44 @@ private fun OverallAwardsScreen(
             Button(
                 onClick = {
                     val completedAt = Instant.now().toString()
-                    val uploadPacket = buildDivisionPacketJson(
-                        groupId = groupBanner.groupId.ifBlank { divisionId },
+                    Log.d(
+                        COMPLETE_ROUND_TRACE_TAG,
+                        "Complete Round tapped: divisionId=$divisionId divisionType=$divisionType ringId=$ringId " +
+                            "weaponsPlacements=${weaponsPlacements.size} hyungsPlacements=${hyungsPlacements.size} " +
+                            "sparringPlacements=${sparringPlacements.size} weaponsFinalizeLabels=${weaponsFinalizeState.labels.size} " +
+                            "weaponsFinalizeMessage=${weaponsFinalizeState.message.orEmpty()} hyungsFinalizeLabels=${hyungsFinalizeState.labels.size} " +
+                            "hyungsFinalizeMessage=${hyungsFinalizeState.message.orEmpty()}"
+                    )
+                    val canonicalEventName = activeEventName.trim()
+                    if (canonicalEventName.isBlank()) {
+                        Log.w(
+                            COMPLETE_ROUND_TRACE_TAG,
+                            "Complete Round blocked: unresolved active event for ringId=$ringId"
+                        )
+                        return@Button
+                    }
+                    val uploadRequest = buildDivisionResultPacketBuildRequest(
+                        groupBanner = groupBanner,
+                        activeEventName = canonicalEventName,
                         divisionId = divisionId,
                         divisionType = divisionType,
-                        competitors = divisionCompetitors,
-                        weaponsPlacements = weaponsPlacements,
-                        hyungsPlacements = hyungsPlacements,
-                        sparringPlacements = sparringPlacements,
+                        ringId = ringId,
+                        ringLabel = ringLabel,
+                        tabletLabel = tabletLabel,
+                        divisionCompetitors = divisionCompetitors,
+                        weaponsCompetitors = weaponsCompetitors,
                         weaponsScoresByCompetitor = weaponsScoresByCompetitor,
-                        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
                         weaponsPlacementsByCompetitorId = weaponsPlacementsByCompetitorId,
-                        hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
                         weaponsTieBreakDetailsByCompetitorId = weaponsTieBreakDetailsByCompetitorId,
+                        weaponsFinalizeState = weaponsFinalizeState,
+                        hyungsCompetitors = hyungsCompetitors,
+                        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
+                        hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
                         hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
+                        hyungsFinalizeState = hyungsFinalizeState,
+                        sparringRound0Bouts = sparringRound0Bouts,
+                        sparringWinners = sparringWinners,
+                        sparringBoutProgress = sparringBoutProgress,
                         judgeSignatures = judgeSignatures.take(requiredJudgeCount),
                         scorekeeperSignature = scorekeeperSignature,
                         timekeeperSignature = timekeeperSignature,
@@ -3696,7 +3839,7 @@ private fun OverallAwardsScreen(
                         onlyOneScorekeeperToday = onlyOneScorekeeperToday,
                         completedAt = completedAt
                     )
-                    onCompleteRound(uploadPacket, snapshot.first, snapshot.second)
+                    onCompleteRound(uploadRequest, snapshot.first, snapshot.second)
                 },
                 enabled = allSignaturesComplete,
                 modifier = Modifier.align(Alignment.CenterStart)
@@ -3718,8 +3861,12 @@ private fun OverallAwardsScreen(
                 Text("Competitors: $groupSize")
 
                 Text("Weapons", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                weaponsPlacements.forEach { (label, competitor) ->
-                    Text(formatSummaryPlacementLine(label, competitor))
+                if (weaponsCompetitors.isEmpty()) {
+                    Text("No weapons competitors.")
+                } else {
+                    weaponsPlacements.forEach { (label, competitor) ->
+                        Text(formatSummaryPlacementLine(label, competitor))
+                    }
                 }
 
                 Text("Hyungs", fontWeight = FontWeight.Bold, fontSize = 18.sp)
@@ -3787,7 +3934,7 @@ private fun OverallAwardsScreen(
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Judges / Staff Signatures")
+                Text("Judges / Staff Signatures", fontWeight = FontWeight.Bold, fontSize = 18.sp)
                 judgeSignatures.forEachIndexed { index, entry ->
                     val judgeIsActive = index < requiredJudgeCount
                     Row(
@@ -3799,26 +3946,39 @@ private fun OverallAwardsScreen(
                             value = entry.name,
                             onValueChange = { updated ->
                                 judgeSignatures = judgeSignatures.toMutableList().also {
-                                    it[index] = SignatureEntry(name = capitalizeWords(updated), dan = it[index].dan)
+                                    it[index] = it[index].copy(name = capitalizeWords(updated))
                                 }
                             },
                             label = { Text("Judge ${index + 1} Name") },
                             singleLine = true,
                             enabled = judgeIsActive,
                             textStyle = androidx.compose.ui.text.TextStyle(fontFamily = signatureFontFamily, fontSize = 28.sp),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1.15f)
                         )
-                        OutlinedTextField(
-                            value = entry.dan,
+                        SignatureRankDropdown(
+                            value = entry.rank,
+                            enabled = judgeIsActive,
                             onValueChange = { updated ->
                                 judgeSignatures = judgeSignatures.toMutableList().also {
-                                    it[index] = SignatureEntry(name = it[index].name, dan = updated)
+                                    it[index] = it[index].copy(rank = updated)
                                 }
                             },
-                            label = { Text("Rank / #") },
+                            modifier = Modifier.weight(0.55f)
+                        )
+                        OutlinedTextField(
+                            value = entry.number,
+                            onValueChange = { updated ->
+                                val sanitized = updated.filter { it.isDigit() }.take(6)
+                                judgeSignatures = judgeSignatures.toMutableList().also {
+                                    it[index] = it[index].copy(number = sanitized)
+                                }
+                            },
+                            label = { Text("Number") },
+                            placeholder = { Text("12345") },
                             singleLine = true,
                             enabled = judgeIsActive,
-                            modifier = Modifier.width(180.dp)
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.width(96.dp)
                         )
                     }
                 }
@@ -3839,14 +3999,20 @@ private fun OverallAwardsScreen(
                     value = scorekeeperSignature,
                     enabled = true,
                     onNameChanged = { scorekeeperSignature = scorekeeperSignature.copy(name = capitalizeWords(it)) },
-                    onDanChanged = { scorekeeperSignature = scorekeeperSignature.copy(dan = it) }
+                    onRankChanged = { scorekeeperSignature = scorekeeperSignature.copy(rank = it) },
+                    onNumberChanged = {
+                        scorekeeperSignature = scorekeeperSignature.copy(number = it.filter { ch -> ch.isDigit() }.take(6))
+                    }
                 )
                 SignatureEntryField(
                     label = "Timekeeper",
                     value = timekeeperSignature,
                     enabled = !onlyOneScorekeeperToday,
                     onNameChanged = { timekeeperSignature = timekeeperSignature.copy(name = capitalizeWords(it)) },
-                    onDanChanged = { timekeeperSignature = timekeeperSignature.copy(dan = it) }
+                    onRankChanged = { timekeeperSignature = timekeeperSignature.copy(rank = it) },
+                    onNumberChanged = {
+                        timekeeperSignature = timekeeperSignature.copy(number = it.filter { ch -> ch.isDigit() }.take(6))
+                    }
                 )
             }
         }
@@ -3860,7 +4026,8 @@ private fun SignatureEntryField(
     value: SignatureEntry,
     enabled: Boolean = true,
     onNameChanged: (String) -> Unit,
-    onDanChanged: (String) -> Unit
+    onRankChanged: (String) -> Unit,
+    onNumberChanged: (String) -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -3874,15 +4041,23 @@ private fun SignatureEntryField(
             singleLine = true,
             enabled = enabled,
             textStyle = androidx.compose.ui.text.TextStyle(fontFamily = signatureFontFamily, fontSize = 28.sp),
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1.15f)
+        )
+        SignatureRankDropdown(
+            value = value.rank,
+            enabled = enabled,
+            onValueChange = onRankChanged,
+            modifier = Modifier.weight(0.55f)
         )
         OutlinedTextField(
-            value = value.dan,
-            onValueChange = onDanChanged,
-            label = { Text("Rank / #") },
+            value = value.number,
+            onValueChange = { onNumberChanged(it.filter { ch -> ch.isDigit() }.take(6)) },
+            label = { Text("Number") },
+            placeholder = { Text("12345") },
             singleLine = true,
             enabled = enabled,
-            modifier = Modifier.width(180.dp)
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.width(96.dp)
         )
     }
 }
@@ -3890,7 +4065,9 @@ private fun SignatureEntryField(
 private fun SignatureEntry.toJson(): JSONObject {
     return JSONObject().apply {
         put("name", name)
-        put("dan", dan)
+        put("rank", rank)
+        put("number", number)
+        put("dan", listOf(rank, number).filter { it.isNotBlank() }.joinToString(" "))
     }
 }
 
@@ -3942,6 +4119,8 @@ private fun buildWinnerSummaryArray(placements: List<Pair<String, Competitor?>>)
 
 private fun buildDivisionPacketJson(
     groupId: String,
+    groupDivisionNumber: Int?,
+    groupDivisionName: String?,
     divisionId: String,
     divisionType: String,
     competitors: List<Competitor>,
@@ -3960,7 +4139,9 @@ private fun buildDivisionPacketJson(
     onlyOneScorekeeperToday: Boolean,
     completedAt: String
 ): JSONObject {
-    val activeJudges = judgeSignatures.filter { it.name.isNotBlank() || it.dan.isNotBlank() }
+    val activeJudges = judgeSignatures.filter {
+        it.name.isNotBlank() || it.rank.isNotBlank() || it.number.isNotBlank()
+    }
     val centerJudgeIndex = if (activeJudges.isEmpty()) 0 else activeJudges.size / 2
     val centerJudge = activeJudges.getOrNull(centerJudgeIndex)
     val cornerJudges = JSONArray().apply {
@@ -3973,6 +4154,8 @@ private fun buildDivisionPacketJson(
 
     return JSONObject().apply {
         put("groupId", groupId)
+        put("groupDivisionNumber", groupDivisionNumber)
+        put("groupDivisionName", groupDivisionName)
         put("divisionId", divisionId)
         put("divisionType", divisionType)
         put("generatedAt", completedAt)
@@ -4149,23 +4332,48 @@ private fun buildSummarySheetLines(
         }.joinToString(", ")
     }
 
+    fun formatAwardCompetitor(competitor: Competitor?): String {
+        return competitor?.let {
+            "${it.name} - ${RankFormatter.formatForDisplay(it.rank)} - ${it.studio}"
+        } ?: "N/A"
+    }
+
+    fun isTtldDivision(): Boolean {
+        return groupBanner.groupDivisionName?.contains("TTLD", ignoreCase = true) == true ||
+            divisionType.contains("TTLD", ignoreCase = true)
+    }
+
     val lines = mutableListOf<String>()
+    val ttldDivision = isTtldDivision()
     lines += "Division Packet Summary"
-    lines += "Group: ${groupBanner.groupId.ifBlank { divisionId }} | Division: $divisionId | Type: $divisionType"
+    lines += "Group: ${formatDivisionDisplayLabel(groupBanner.groupDivisionNumber, groupBanner.groupDivisionName, divisionId)} | Division: $divisionId | Type: $divisionType"
     lines += "Completed: $completedAt"
     lines += "Group Size: $groupSize"
     lines += ""
     lines += "Winner Summary"
-    listOf(
+    val awardSections = listOf(
         "Weapons" to weaponsPlacements,
         "Hyungs" to hyungsPlacements,
         "Sparring" to sparringPlacements
-    ).forEach { (label, placements) ->
-        lines += label
-        placements.forEach { (placeLabel, competitor) ->
-            val points = pointsForPlacement(placeLabel)
-            val competitorLabel = competitor?.let { "${it.name} (${it.rank})" } ?: "N/A"
-            lines += "  $placeLabel ($points pts): $competitorLabel"
+    )
+    if (awardSections.all { it.second.isEmpty() }) {
+        lines += "No awards were completed."
+    } else {
+        awardSections.forEach { (label, placements) ->
+            lines += label
+            if (placements.isEmpty()) {
+                lines += "  N/A"
+            } else {
+                placements.forEach { (placeLabel, competitor) ->
+                    val points = pointsForPlacement(placeLabel)
+                    val competitorLabel = if (ttldDivision && label == "Sparring") {
+                        formatAwardCompetitor(competitor)
+                    } else {
+                        competitor?.let { "${it.name} (${it.rank})" } ?: "N/A"
+                    }
+                    lines += "  $placeLabel ($points pts): $competitorLabel"
+                }
+            }
         }
     }
     lines += ""
@@ -4185,7 +4393,8 @@ private fun buildSummarySheetLines(
     lines += ""
     lines += "Judges"
     judgeSignatures.forEachIndexed { index, signature ->
-        lines += "  Judge ${index + 1}: ${signature.name} ${signature.dan}".trimEnd()
+        val rankNumber = listOf(signature.rank, signature.number).filter { it.isNotBlank() }.joinToString(" ")
+        lines += "  Judge ${index + 1}: ${signature.name} $rankNumber".trimEnd()
     }
     lines += "  Operator: ${scorekeeperSignature.name}/${timekeeperSignature.name}${if (onlyOneScorekeeperToday) " (single)" else ""}"
     lines += ""
@@ -4196,6 +4405,58 @@ private fun buildSummarySheetLines(
         lines += sparringReviewLines.map { "  $it" }
     }
     return lines
+}
+
+@Composable
+private fun SignatureRankDropdown(
+    value: String,
+    enabled: Boolean,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = {},
+                label = { Text("Rank") },
+                placeholder = { Text("Select") },
+                singleLine = true,
+                enabled = enabled,
+                readOnly = true,
+                modifier = Modifier.weight(1f)
+            )
+            Button(
+                onClick = { if (enabled) expanded = !expanded },
+                enabled = enabled,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp)
+            ) {
+                Text("▼")
+            }
+        }
+        DropdownMenu(
+            expanded = expanded && enabled,
+            onDismissRequest = { expanded = false }
+        ) {
+            signatureRankOptions.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option) },
+                    onClick = {
+                        onValueChange(option)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+private fun isCompleteSignatureEntry(entry: SignatureEntry): Boolean {
+    return entry.name.isNotBlank() &&
+        entry.rank.isNotBlank() &&
+        entry.number.length in 5..6
 }
 
 private fun wrapSnapshotText(text: String, paint: Paint, maxWidth: Float): List<String> {
@@ -4322,16 +4583,299 @@ private fun buildSummarySheetImageBytes(lines: List<String>): ByteArray {
 private fun buildOverallAwardsSummary(
     competitors: List<Competitor>,
     weaponsLabels: Map<String, String>,
+    weaponsScoresByCompetitor: Map<String, List<String>>,
     hyungsLabels: Map<String, String>,
+    hyungsScoresByCompetitor: Map<String, List<String>>,
     sparringWinners: Map<Int, Map<Int, Competitor>>,
     round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>
 ): OverallAwardsSummary {
     val placeLabels = listOf("1st Place", "2nd Place", "Co-3rd Place", "Co-3rd Place")
-    val weapons = orderedSummaryPlacements(competitors, weaponsLabels, placeLabels)
-    val hyungs = orderedSummaryPlacements(competitors, hyungsLabels, placeLabels)
+    val weapons = summaryPlacementsIfAwardedOrDerived(
+        competitors = competitors,
+        placementsByCompetitorId = weaponsLabels,
+        scoresByCompetitor = weaponsScoresByCompetitor,
+        placeLabels = placeLabels
+    )
+    val hyungs = summaryPlacementsIfAwardedOrDerived(
+        competitors = competitors,
+        placementsByCompetitorId = hyungsLabels,
+        scoresByCompetitor = hyungsScoresByCompetitor,
+        placeLabels = placeLabels
+    )
 
     val sparring = buildSparringAwardPlacements(round0Bouts, sparringWinners)
     return OverallAwardsSummary(weapons = weapons, hyungs = hyungs, sparring = sparring)
+}
+
+private fun summaryPlacementsIfAwardedOrDerived(
+    competitors: List<Competitor>,
+    placementsByCompetitorId: Map<String, String>,
+    scoresByCompetitor: Map<String, List<String>>,
+    placeLabels: List<String>
+): List<Pair<String, Competitor?>> {
+    if (placementsByCompetitorId.values.any { it.isNotBlank() }) {
+        return orderedSummaryPlacements(competitors, placementsByCompetitorId, placeLabels)
+    }
+    return deriveSummaryPlacementsFromScores(competitors, scoresByCompetitor, placeLabels)
+        ?: emptyList()
+}
+
+private fun deriveSummaryPlacementsFromScores(
+    competitors: List<Competitor>,
+    scoresByCompetitor: Map<String, List<String>>,
+    placeLabels: List<String>
+): List<Pair<String, Competitor?>>? {
+    if (competitors.isEmpty()) return emptyList()
+    val ordered = competitors.mapNotNull { competitor ->
+        val total = calculateScoreTotal(scoresByCompetitor[competitor.id] ?: emptyList()) ?: return null
+        competitor to total
+    }.sortedWith(
+        compareByDescending<Pair<Competitor, Double>> { it.second }
+            .thenBy { it.first.name }
+            .thenBy { it.first.id }
+    )
+    if (ordered.size != competitors.size) return null
+    if (ordered.zipWithNext().any { (left, right) -> left.second == right.second }) return null
+    return placeLabels.mapIndexed { index, placeLabel ->
+        placeLabel to ordered.getOrNull(index)?.first
+    }
+}
+
+private data class SparringBracketSummary(
+    val rounds: List<BracketSheetRound>,
+    val byeCount: Int,
+    val actualBoutCount: Int,
+    val completedBoutCount: Int
+)
+
+private fun buildSparringBracketSummary(
+    round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
+    winnersByRound: Map<Int, Map<Int, Competitor>>,
+    competitorCount: Int
+): SparringBracketSummary {
+    if (round0Bouts.isEmpty()) {
+        return SparringBracketSummary(
+            rounds = emptyList(),
+            byeCount = 0,
+            actualBoutCount = 0,
+            completedBoutCount = 0
+        )
+    }
+
+    val rounds = buildBracketSheetRounds(round0Bouts, winnersByRound)
+    val byeCount = if (competitorCount <= 0) 0 else nextPowerOfTwo(competitorCount) - competitorCount
+    val actualBoutCount = rounds.sumOf { round -> round.slots.count { !it.actualBye } }
+    val completedBoutCount = rounds.withIndex().sumOf { (roundIndex, round) ->
+        val roundWinners = winnersByRound[roundIndex] ?: emptyMap()
+        round.slots.withIndex().count { (boutIndex, bout) ->
+            !bout.actualBye && selectedWinnerForDisplay(roundIndex, boutIndex, bout, roundWinners) != null
+        }
+    }
+
+    return SparringBracketSummary(
+        rounds = rounds,
+        byeCount = byeCount,
+        actualBoutCount = actualBoutCount,
+        completedBoutCount = completedBoutCount
+    )
+}
+
+private fun nextPowerOfTwo(value: Int): Int {
+    if (value <= 1) return 1
+    var power = 1
+    while (power < value) {
+        power = power shl 1
+    }
+    return power
+}
+
+private fun buildDivisionResultPacketBuildRequest(
+    groupBanner: GroupBanner,
+    activeEventName: String,
+    divisionId: String,
+    divisionType: String,
+    ringId: String,
+    ringLabel: String,
+    tabletLabel: String,
+    divisionCompetitors: List<Competitor>,
+    weaponsCompetitors: List<Competitor>,
+    weaponsScoresByCompetitor: Map<String, List<String>>,
+    weaponsPlacementsByCompetitorId: Map<String, String>,
+    weaponsTieBreakDetailsByCompetitorId: Map<String, String>,
+    weaponsFinalizeState: PlacementFinalizeState,
+    hyungsCompetitors: List<Competitor>,
+    hyungsScoresByCompetitor: Map<String, List<String>>,
+    hyungsPlacementsByCompetitorId: Map<String, String>,
+    hyungsTieBreakDetailsByCompetitorId: Map<String, String>,
+    hyungsFinalizeState: PlacementFinalizeState,
+    sparringRound0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
+    sparringWinners: Map<Int, Map<Int, Competitor>>,
+    sparringBoutProgress: Map<String, SparringBoutProgress>,
+    judgeSignatures: List<SignatureEntry>,
+    scorekeeperSignature: SignatureEntry,
+    timekeeperSignature: SignatureEntry,
+    onlyOneScorekeeperToday: Boolean,
+    completedAt: String
+): DivisionResultPacketBuildRequest {
+    val divisionNumber = groupBanner.groupDivisionNumber
+        ?: divisionId.toIntOrNull()
+        ?: 0
+    val groupName = groupBanner.groupDivisionName?.takeIf { it.isNotBlank() } ?: divisionType
+    val eventName = activeEventName.trim()
+    require(eventName.isNotBlank()) { "Active event name is required" }
+    Log.d(
+        COMPLETE_ROUND_TRACE_TAG,
+        "Building request: eventName=$eventName groupDivisionNumber=$divisionNumber groupName=$groupName divisionId=$divisionId " +
+            "weaponsCompetitors=${weaponsCompetitors.size} hyungsCompetitors=${hyungsCompetitors.size} " +
+            "weaponsScores=${weaponsScoresByCompetitor.size} hyungsScores=${hyungsScoresByCompetitor.size} " +
+            "weaponsFinalizeLabels=${weaponsFinalizeState.labels.size} weaponsFinalizeMessage=${weaponsFinalizeState.message.orEmpty()} " +
+            "hyungsFinalizeLabels=${hyungsFinalizeState.labels.size} hyungsFinalizeMessage=${hyungsFinalizeState.message.orEmpty()} " +
+            "sparringRounds=${sparringRound0Bouts.size} sparringWinners=${sparringWinners.size} " +
+            "sparringProgress=${sparringBoutProgress.size}"
+    )
+    val overallAwards = buildOverallAwardsSummary(
+        competitors = divisionCompetitors,
+        weaponsLabels = weaponsPlacementsByCompetitorId,
+        weaponsScoresByCompetitor = weaponsScoresByCompetitor,
+        hyungsLabels = hyungsPlacementsByCompetitorId,
+        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
+        sparringWinners = sparringWinners,
+        round0Bouts = sparringRound0Bouts
+    )
+
+    return DivisionResultPacketBuildRequest(
+        eventName = eventName,
+        groupId = divisionNumber.takeIf { it > 0 }?.toString() ?: divisionId,
+        groupDivisionNumber = divisionNumber,
+        groupName = groupName,
+        ringId = ringId,
+        ringLabel = ringLabel.ifBlank { ringId },
+        completedAt = completedAt,
+        competitors = divisionCompetitors,
+        weaponsResults = buildFormResultsForPacket(
+            competitors = weaponsCompetitors,
+            scoresByCompetitor = weaponsScoresByCompetitor,
+            discipline = HyungDiscipline.WEAPONS
+        ),
+        hyungsResults = buildFormResultsForPacket(
+            competitors = hyungsCompetitors,
+            scoresByCompetitor = hyungsScoresByCompetitor,
+            discipline = HyungDiscipline.HYUNGS
+        ),
+        sparringTournament = buildSparringTournamentResult(
+            round0Bouts = sparringRound0Bouts,
+            winnersByRound = sparringWinners,
+            boutProgressByKey = sparringBoutProgress
+        ),
+        overallAwards = overallAwards,
+        signatures = judgeSignatures + listOf(scorekeeperSignature, timekeeperSignature),
+        tabletLabel = tabletLabel,
+        weaponsFinalizeState = weaponsFinalizeState,
+        hyungsFinalizeState = hyungsFinalizeState,
+        participantDivisionNumbers = divisionCompetitors.associate { it.id to divisionNumber },
+        participantRankCodes = divisionCompetitors.associate { it.id to it.rank },
+        weaponsTieBreakDetails = weaponsTieBreakDetailsByCompetitorId,
+        hyungsTieBreakDetails = hyungsTieBreakDetailsByCompetitorId
+    )
+}
+
+private fun buildFormResultsForPacket(
+    competitors: List<Competitor>,
+    scoresByCompetitor: Map<String, List<String>>,
+    discipline: HyungDiscipline
+): List<HyungResult> {
+    return competitors.mapNotNull { competitor ->
+        val rawScores = scoresByCompetitor[competitor.id].orEmpty()
+        val parsedScores = rawScores.mapNotNull { it.toDoubleOrNull() }
+        val total = calculateScoreTotal(rawScores) ?: return@mapNotNull null
+        HyungResult(
+            competitor = competitor,
+            discipline = discipline,
+            scores = parsedScores,
+            total = total
+        )
+    }
+}
+
+private fun buildSparringTournamentResult(
+    round0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
+    winnersByRound: Map<Int, Map<Int, Competitor>>,
+    boutProgressByKey: Map<String, SparringBoutProgress>
+): SparringTournamentResult? {
+    if (round0Bouts.isEmpty()) return null
+
+    val sheetRounds = buildBracketSheetRounds(round0Bouts, winnersByRound)
+    if (sheetRounds.isEmpty()) return null
+
+    val rounds = sheetRounds.mapIndexed { roundIndex, round ->
+        val boutResults = round.slots.mapIndexed { boutIndex, bout ->
+            val progress = boutProgressByKey[sparringBoutKey(roundIndex, boutIndex)]
+            val bluePoints = progress?.bluePoints ?: 0
+            val redPoints = progress?.redPoints ?: 0
+            val blueWarnings = progress?.blueWarnings ?: 0
+            val redWarnings = progress?.redWarnings ?: 0
+            val assessment = assessSparringBout(
+                bout = bout,
+                bluePoints = bluePoints,
+                redPoints = redPoints,
+                blueWarnings = blueWarnings,
+                redWarnings = redWarnings,
+                elapsedSeconds = progress?.elapsedSeconds ?: 0
+            )
+            val packetBout = com.summ0.tournamentscoringapp.engine.SparringBout(
+                boutNumber = bout.boutNumber,
+                competitorA = bout.blue.competitor,
+                competitorB = bout.red.competitor
+            )
+            val winner = assessment.winner ?: automaticBoutWinner(packetBout)
+            val outcome = when {
+                bout.actualBye -> SparringOutcome.BYE
+                assessment.blueDisqualified && assessment.redDisqualified -> SparringOutcome.DOUBLE_DISQUALIFICATION
+                assessment.blueDisqualified -> SparringOutcome.WARNING_DISQUALIFICATION
+                assessment.redDisqualified -> SparringOutcome.WARNING_DISQUALIFICATION
+                winner != null && (progress?.elapsedSeconds ?: 0) >= SPARRING_MATCH_DURATION_SECONDS -> SparringOutcome.TIME_EXPIRED
+                winner != null -> SparringOutcome.FIRST_TO_THREE
+                else -> SparringOutcome.IN_PROGRESS
+            }
+            SparringBoutResult(
+                bout = packetBout,
+                competitorAResult = SparringCompetitorResult(
+                    competitor = bout.blue.competitor,
+                    rawPoints = bluePoints,
+                    standardWarningCount = blueWarnings,
+                    severeWarningCount = 0,
+                    pointDeductions = blueWarnings / 2,
+                    adjustedPoints = adjustedSparringScore(bluePoints, blueWarnings),
+                    disqualified = assessment.blueDisqualified
+                ),
+                competitorBResult = SparringCompetitorResult(
+                    competitor = bout.red.competitor,
+                    rawPoints = redPoints,
+                    standardWarningCount = redWarnings,
+                    severeWarningCount = 0,
+                    pointDeductions = redWarnings / 2,
+                    adjustedPoints = adjustedSparringScore(redPoints, redWarnings),
+                    disqualified = assessment.redDisqualified
+                ),
+                warnings = emptyList(),
+                elapsedSeconds = progress?.elapsedSeconds ?: 0,
+                outcome = outcome,
+                winner = winner
+            )
+        }
+        SparringRoundResult(
+            roundNumber = roundIndex + 1,
+            boutResults = boutResults,
+            winners = boutResults.mapNotNull { it.winner }.distinctBy { it.id }
+        )
+    }
+    val champion = rounds.lastOrNull()?.winners?.firstOrNull()
+        ?: rounds.lastOrNull()?.boutResults?.firstOrNull()?.winner
+    return SparringTournamentResult(
+        rounds = rounds,
+        champion = champion,
+        bracketSize = round0Bouts.size * 2
+    )
 }
 
 internal fun orderedSummaryPlacements(
@@ -5070,6 +5614,45 @@ private fun formatRemainingTime(elapsedSeconds: Int): String {
     return String.format(Locale.US, "%d:%02d", minutes, seconds)
 }
 
+private fun isSparringPhase(phaseName: String): Boolean {
+    return phaseName.contains("Sparring", ignoreCase = true)
+}
+
+private fun ringPaceLabel(elapsed: String, estimated: String): String? {
+    val elapsedSeconds = parseDurationSeconds(elapsed) ?: return null
+    val estimatedSeconds = parseDurationSeconds(estimated) ?: return null
+    if (estimatedSeconds <= 0) return null
+
+    val ratio = elapsedSeconds.toDouble() / estimatedSeconds.toDouble()
+    return when {
+        ratio < 0.80 -> "Ahead of Schedule"
+        ratio <= 1.20 -> "On Time"
+        else -> "Behind Schedule"
+    }
+}
+
+private fun parseDurationSeconds(duration: String): Int? {
+    val value = duration.trim()
+    if (value.isEmpty()) return null
+
+    val parts = value.split(":").map { it.trim() }
+    return when (parts.size) {
+        1 -> parts[0].toIntOrNull()
+        2 -> {
+            val minutes = parts[0].toIntOrNull() ?: return null
+            val seconds = parts[1].toIntOrNull() ?: return null
+            minutes * 60 + seconds
+        }
+        3 -> {
+            val hours = parts[0].toIntOrNull() ?: return null
+            val minutes = parts[1].toIntOrNull() ?: return null
+            val seconds = parts[2].toIntOrNull() ?: return null
+            hours * 3600 + minutes * 60 + seconds
+        }
+        else -> null
+    }
+}
+
 private fun calculateScoreSummary(scoreInputs: List<String>): String {
     val total = calculateScoreTotal(scoreInputs) ?: return when {
         scoreInputs.any { it.isNotBlank() && it.toDoubleOrNull() == null } -> "Invalid score"
@@ -5118,7 +5701,9 @@ private fun buildSparringReviewLines(
             }
             val outcomeLabel = progress?.outcomeLabel?.trim().orEmpty()
             val outcomeSuffix = if (outcomeLabel.isBlank()) "" else " | $outcomeLabel"
-            val winnerLabel = winner?.name ?: "N/A"
+            val winnerLabel = winner?.let {
+                "${it.name} - ${RankFormatter.formatForDisplay(it.rank)} - ${it.studio}"
+            } ?: "N/A"
             lines += "${round.label} Bout ${bout.boutNumber}: Blue $blueLabel vs Red $redLabel | $scoreLabel | Winner: $winnerLabel$outcomeSuffix"
         }
     }
@@ -5229,7 +5814,7 @@ private fun validateCompetitorForGroup(
     if (competitor.name.isBlank()) return "Name is required."
     if (competitor.studio.isBlank()) return "Studio is required."
     if (competitor.age !in division.ageRange) {
-        return "Age ${competitor.age} is outside this division range (${division.ageRange.first}-${division.ageRange.last})."
+        return "Age ${competitor.age} is outside this division range (${formatAgeRangeLabel(division.ageRange)})."
     }
     if (competitor.rankLevel !in division.rankRange) {
         return "Rank ${RankFormatter.formatForDisplay(competitor.rank)} is outside this division range."

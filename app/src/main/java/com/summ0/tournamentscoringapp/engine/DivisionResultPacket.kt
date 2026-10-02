@@ -112,10 +112,14 @@ data class DivisionResultPacketSparringBout(
     val redParticipantId: String?,
     val winnerParticipantId: String?,
     val outcome: String,
-    val bluePoints: Int,
-    val redPoints: Int,
-    val blueWarnings: Int,
-    val redWarnings: Int,
+    val blueRawPoints: Int,
+    val blueAdjustedPoints: Int,
+    val blueStandardWarnings: Int,
+    val blueSevereWarnings: Int,
+    val redRawPoints: Int,
+    val redAdjustedPoints: Int,
+    val redStandardWarnings: Int,
+    val redSevereWarnings: Int,
     val elapsedSeconds: Int,
     val blueDisqualified: Boolean,
     val redDisqualified: Boolean,
@@ -221,7 +225,9 @@ object DivisionResultPacketBuilder {
                 hyungs = request.overallAwards.hyungs.mapNotNull { it.toPacketPlacement() },
                 sparring = request.overallAwards.sparring.mapNotNull { it.toPacketPlacement() }
             ),
-            signatures = request.signatures.filter { it.name.isNotBlank() || it.dan.isNotBlank() },
+            signatures = request.signatures.filter {
+                it.name.isNotBlank() || it.rank.isNotBlank() || it.number.isNotBlank()
+            },
             source = DivisionResultPacketSource(
                 client = CLIENT_NAME,
                 appVersionName = BuildConfig.VERSION_NAME,
@@ -238,15 +244,13 @@ object DivisionResultPacketBuilder {
         tieBreakDetails: Map<String, String>,
         disciplineName: String
     ): List<DivisionResultPacketFormsResult> {
-        if (results.isNotEmpty() && finalizeState == null) {
-            error("Finalized placements are required for completed $disciplineName results.")
-        }
-
-        if (results.isNotEmpty() && !finalizeState?.message.isNullOrBlank()) {
+        if (results.isNotEmpty() && isUnresolvedTieBreakMessage(finalizeState?.message)) {
             error("Cannot build $disciplineName packet results while a tie-break remains unresolved.")
         }
 
-        val labels = finalizeState?.labels.orEmpty()
+        val labels = finalizeState?.labels.orEmpty().ifEmpty {
+            deriveFormPlacementsFromResults(results).orEmpty()
+        }
         if (results.isNotEmpty() && labels.isEmpty()) {
             error("Finalized placements are required for completed $disciplineName results.")
         }
@@ -263,7 +267,7 @@ object DivisionResultPacketBuilder {
                 scores = result.scores,
                 total = result.total,
                 place = resolvedPlace,
-                tieBreakDetail = finalizeState!!.tieBreakDetails[result.competitor.id]
+                tieBreakDetail = finalizeState?.tieBreakDetails?.get(result.competitor.id)
                     ?: tieBreakDetails[result.competitor.id].orEmpty()
             )
         }.sortedWith(
@@ -271,6 +275,32 @@ object DivisionResultPacketBuilder {
                 .thenByDescending { it.total }
                 .thenBy { it.participantId }
         )
+    }
+
+    private fun deriveFormPlacementsFromResults(results: List<HyungResult>): Map<String, String>? {
+        if (results.isEmpty()) return emptyMap()
+        val ordered = results.sortedWith(
+            compareByDescending<HyungResult> { it.total }
+                .thenBy { it.competitor.name }
+                .thenBy { it.competitor.id }
+        )
+        if (ordered.zipWithNext().any { (left, right) -> left.total == right.total }) {
+            return null
+        }
+        val labels = listOf("1st Place", "2nd Place", "Co-3rd Place", "Co-3rd Place")
+        return ordered.take(labels.size).mapIndexed { index, result ->
+            result.competitor.id to labels[index]
+        }.toMap()
+    }
+
+    private fun isUnresolvedTieBreakMessage(message: String?): Boolean {
+        val normalized = message?.trim().orEmpty()
+        if (normalized.isBlank()) return false
+        if (normalized.contains("finalized", ignoreCase = true)) return false
+        return normalized.contains("tie", ignoreCase = true) ||
+            normalized.contains("remain", ignoreCase = true) ||
+            normalized.contains("required", ignoreCase = true) ||
+            normalized.contains("unresolved", ignoreCase = true)
     }
 
     private fun buildSparringDiscipline(
@@ -300,10 +330,14 @@ object DivisionResultPacketBuilder {
                             redParticipantId = boutResult.bout.competitorB?.id,
                             winnerParticipantId = boutResult.winner?.id,
                             outcome = boutResult.outcome.name,
-                            bluePoints = boutResult.competitorAResult.adjustedPoints,
-                            redPoints = boutResult.competitorBResult.adjustedPoints,
-                            blueWarnings = boutResult.competitorAResult.standardWarningCount + boutResult.competitorAResult.severeWarningCount,
-                            redWarnings = boutResult.competitorBResult.standardWarningCount + boutResult.competitorBResult.severeWarningCount,
+                            blueRawPoints = boutResult.competitorAResult.rawPoints.coerceAtLeast(0),
+                            blueAdjustedPoints = boutResult.competitorAResult.adjustedPoints.coerceAtLeast(0),
+                            blueStandardWarnings = boutResult.competitorAResult.standardWarningCount.coerceAtLeast(0),
+                            blueSevereWarnings = boutResult.competitorAResult.severeWarningCount.coerceAtLeast(0),
+                            redRawPoints = boutResult.competitorBResult.rawPoints.coerceAtLeast(0),
+                            redAdjustedPoints = boutResult.competitorBResult.adjustedPoints.coerceAtLeast(0),
+                            redStandardWarnings = boutResult.competitorBResult.standardWarningCount.coerceAtLeast(0),
+                            redSevereWarnings = boutResult.competitorBResult.severeWarningCount.coerceAtLeast(0),
                             elapsedSeconds = boutResult.elapsedSeconds,
                             blueDisqualified = boutResult.competitorAResult.disqualified,
                             redDisqualified = boutResult.competitorBResult.disqualified,
@@ -356,7 +390,9 @@ object DivisionResultPacketBuilder {
 internal fun SignatureEntry.toPacketJson(): JSONObject {
     return JSONObject().apply {
         put("name", name)
-        put("dan", dan)
+        put("rank", rank)
+        put("number", number)
+        put("dan", listOf(rank, number).filter { it.isNotBlank() }.joinToString(" "))
         put("role", role)
         put("signedAt", signedAt.ifBlank { "" })
     }
@@ -505,10 +541,14 @@ private fun DivisionResultPacketSparringBout.toJson(): JSONObject {
         put("redParticipantId", redParticipantId ?: JSONObject.NULL)
         put("winnerParticipantId", winnerParticipantId ?: JSONObject.NULL)
         put("outcome", outcome)
-        put("bluePoints", bluePoints)
-        put("redPoints", redPoints)
-        put("blueWarnings", blueWarnings)
-        put("redWarnings", redWarnings)
+        put("blueRawPoints", blueRawPoints)
+        put("blueAdjustedPoints", blueAdjustedPoints)
+        put("blueStandardWarnings", blueStandardWarnings)
+        put("blueSevereWarnings", blueSevereWarnings)
+        put("redRawPoints", redRawPoints)
+        put("redAdjustedPoints", redAdjustedPoints)
+        put("redStandardWarnings", redStandardWarnings)
+        put("redSevereWarnings", redSevereWarnings)
         put("elapsedSeconds", elapsedSeconds)
         put("blueDisqualified", blueDisqualified)
         put("redDisqualified", redDisqualified)

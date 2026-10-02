@@ -14,6 +14,15 @@ fun JSONObject.optNonBlank(vararg keys: String): String? {
     return null
 }
 
+fun JSONObject.optNullableString(vararg keys: String): String? {
+    keys.forEach { key ->
+        if (!has(key) || isNull(key)) return@forEach
+        val value = optString(key, "").trim()
+        if (value.isNotEmpty()) return value
+    }
+    return null
+}
+
 fun parseRankRange(root: JSONObject, rawCompetitors: JSONArray): ParsedRankRange {
     val rankRangeJson = root.optJSONObject("rankRange")
     val lowLabel = rankRangeJson?.optNonBlank("low", "min")
@@ -77,8 +86,39 @@ fun JSONObject.optStringList(key: String): List<String> {
     return result
 }
 
+fun parsePhaseTimingList(root: JSONObject): List<PhaseTiming> {
+    val values = root.optJSONArray("phaseHistory") ?: return emptyList()
+    val result = mutableListOf<PhaseTiming>()
+    for (index in 0 until values.length()) {
+        val entry = values.optJSONObject(index) ?: continue
+        val name = entry.optString("name", "").trim()
+        val startTime = entry.optString("startTime", "").trim()
+        if (name.isEmpty() || startTime.isEmpty()) continue
+        result += PhaseTiming(
+            name = name,
+            startTime = startTime,
+            endTime = entry.optNullableString("endTime"),
+            elapsed = entry.optString("elapsed", "").trim(),
+            estimated = entry.optString("estimated", "").trim()
+        )
+    }
+    return result
+}
+
 fun parseRemoteGroup(root: JSONObject): RemoteGroup {
     val groupId = root.optString("groupId", "").ifBlank { "group-unknown" }
+    val groupDivisionNumber = when {
+        root.has("groupDivisionNumber") && !root.isNull("groupDivisionNumber") -> {
+            val rawValue = root.opt("groupDivisionNumber")
+            when (rawValue) {
+                is Number -> rawValue.toInt().takeIf { it > 0 }
+                is String -> rawValue.trim().toIntOrNull()?.takeIf { it > 0 }
+                else -> null
+            }
+        }
+        else -> parseDivisionNumberFromLegacyGroupId(groupId)
+    }
+    val groupDivisionName = root.optNullableString("groupDivisionName", "groupDivisionLabel", "name")
     val name = root.optString("name", "Group")
     val ageRangeJson = root.optJSONObject("ageRange")
     val ageRange = if (ageRangeJson != null) {
@@ -110,6 +150,8 @@ fun parseRemoteGroup(root: JSONObject): RemoteGroup {
 
     return RemoteGroup(
         groupId = groupId,
+        groupDivisionNumber = groupDivisionNumber,
+        groupDivisionName = groupDivisionName ?: name,
         name = name,
         ageRange = ageRange,
         rankRange = rankRange.range,

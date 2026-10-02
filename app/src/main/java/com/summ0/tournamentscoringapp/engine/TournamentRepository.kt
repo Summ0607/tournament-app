@@ -1,6 +1,7 @@
 package com.summ0.tournamentscoringapp.engine
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -114,11 +115,32 @@ suspend fun fetchRingAssignment(
                 ringId = ringId,
                 ringLabel = root.optString("ringLabel", ringId.ifBlank { "Ring" }),
                 serverBaseUrl = serverBaseUrl,
+                eventName = root.optString(
+                    "eventName",
+                    root.optString(
+                        "currentEventName",
+                        root.optString("activeEventName", root.optString("tournamentName", ""))
+                    )
+                ).trim(),
                 currentGroup = root.optJSONObject("currentGroup")?.let(::parseRemoteGroup),
                 currentPhase = root.optString("currentPhase", "").trim(),
                 phasePlan = root.opt("phasePlan").let { value ->
                     if (value == null || value == JSONObject.NULL) "" else value.toString()
                 },
+                currentPhaseName = root.optString("currentPhaseName", root.optString("currentPhase", "")).trim(),
+                currentPhaseStartTime = root.optString("currentPhaseStartTime", "").trim(),
+                currentPhaseEndTime = root.optNullableString("currentPhaseEndTime"),
+                currentPhaseElapsed = root.optString("currentPhaseElapsed", "").trim(),
+                currentPhaseEstimated = root.optString("currentPhaseEstimated", "").trim(),
+                currentPhaseCompletedCount = root.optInt("currentPhaseCompletedCount", 0),
+                currentPhaseTotalCount = root.optInt("currentPhaseTotalCount", 0),
+                sparringByeCount = root.optInt("sparringByeCount", 0),
+                sparringActualBoutCount = root.optInt("sparringActualBoutCount", 0),
+                sparringCompletedBoutCount = root.optInt("sparringCompletedBoutCount", 0),
+                ringElapsed = root.optString("ringElapsed", "").trim(),
+                ringEstimated = root.optString("ringEstimated", "").trim(),
+                ringPacePercent = root.optInt("ringPacePercent", 0),
+                phaseHistory = parsePhaseTimingList(root),
                 queuedGroupIds = root.optStringList("queuedGroupIds"),
                 completedGroupIds = root.optStringList("completedGroupIds")
             )
@@ -127,6 +149,77 @@ suspend fun fetchRingAssignment(
         RingAssignmentFetchResult(errorMessage = exception.message ?: "Unable to parse ring response")
     }
 }
+
+suspend fun fetchActiveEventName(serverBaseUrl: String): ActiveEventFetchResult {
+    val endpoint = "/api/events/active"
+    val urlString = "${serverBaseUrl.trimEnd('/')}$endpoint"
+    return withContext(Dispatchers.IO) {
+        try {
+            val url = URL(urlString)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            connection.connect()
+
+            val responseCode = connection.responseCode
+            val responseBody = if (responseCode in 200..299) {
+                connection.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            }
+
+            if (responseCode !in 200..299) {
+                Log.w(
+                    "ActiveEventLookup",
+                    "GET $endpoint failed: status=$responseCode body=${responseBody.ifBlank { "<empty>" }}"
+                )
+                return@withContext ActiveEventFetchResult(
+                    httpStatusCode = responseCode,
+                    responseBody = responseBody,
+                    errorMessage = "HTTP $responseCode from active event endpoint"
+                )
+            }
+
+            val root = JSONObject(responseBody)
+            val activeEvent = root.optString("activeEvent", "").trim()
+            if (activeEvent.isBlank()) {
+                Log.w(
+                    "ActiveEventLookup",
+                    "GET $endpoint returned no activeEvent: status=$responseCode body=${responseBody.ifBlank { "<empty>" }}"
+                )
+                return@withContext ActiveEventFetchResult(
+                    httpStatusCode = responseCode,
+                    responseBody = responseBody,
+                    errorMessage = "activeEvent missing from active event response"
+                )
+            }
+
+            ActiveEventFetchResult(
+                eventName = activeEvent,
+                source = endpoint,
+                httpStatusCode = responseCode,
+                responseBody = responseBody
+            )
+        } catch (exception: Exception) {
+            Log.w(
+                "ActiveEventLookup",
+                "GET $endpoint failed: ${exception.message ?: "Unknown error"}"
+            )
+            ActiveEventFetchResult(
+                errorMessage = exception.message ?: "Unable to resolve active event name from server."
+            )
+        }
+    }
+}
+
+data class ActiveEventFetchResult(
+    val eventName: String = "",
+    val source: String = "",
+    val httpStatusCode: Int? = null,
+    val responseBody: String = "",
+    val errorMessage: String? = null
+)
 
 suspend fun probeHttpOk(urlString: String): HttpProbeResult = withContext(Dispatchers.IO) {
     try {
@@ -227,6 +320,20 @@ data class DivisionResultSubmissionRingAssignment(
     val currentGroupId: String? = null,
     val queuedGroupIds: List<String> = emptyList(),
     val completedGroupIds: List<String> = emptyList(),
+    val currentPhaseName: String = "",
+    val currentPhaseStartTime: String = "",
+    val currentPhaseEndTime: String? = null,
+    val currentPhaseElapsed: String = "",
+    val currentPhaseEstimated: String = "",
+    val currentPhaseCompletedCount: Int = 0,
+    val currentPhaseTotalCount: Int = 0,
+    val sparringByeCount: Int = 0,
+    val sparringActualBoutCount: Int = 0,
+    val sparringCompletedBoutCount: Int = 0,
+    val ringElapsed: String = "",
+    val ringEstimated: String = "",
+    val ringPacePercent: Int = 0,
+    val phaseHistory: List<PhaseTiming> = emptyList(),
     val rawJson: JSONObject = JSONObject()
 )
 
@@ -320,6 +427,20 @@ suspend fun submitDivisionResult(
                                         }
                                     }
                                 } ?: emptyList(),
+                                currentPhaseName = ring.optString("currentPhaseName", ring.optString("currentPhase", "")).trim(),
+                                currentPhaseStartTime = ring.optString("currentPhaseStartTime", "").trim(),
+                                currentPhaseEndTime = ring.optNullableString("currentPhaseEndTime"),
+                                currentPhaseElapsed = ring.optString("currentPhaseElapsed", "").trim(),
+                                currentPhaseEstimated = ring.optString("currentPhaseEstimated", "").trim(),
+                                currentPhaseCompletedCount = ring.optInt("currentPhaseCompletedCount", 0),
+                                currentPhaseTotalCount = ring.optInt("currentPhaseTotalCount", 0),
+                                sparringByeCount = ring.optInt("sparringByeCount", 0),
+                                sparringActualBoutCount = ring.optInt("sparringActualBoutCount", 0),
+                                sparringCompletedBoutCount = ring.optInt("sparringCompletedBoutCount", 0),
+                                ringElapsed = ring.optString("ringElapsed", "").trim(),
+                                ringEstimated = ring.optString("ringEstimated", "").trim(),
+                                ringPacePercent = ring.optInt("ringPacePercent", 0),
+                                phaseHistory = parsePhaseTimingList(ring),
                                 rawJson = ring
                             )
                         },

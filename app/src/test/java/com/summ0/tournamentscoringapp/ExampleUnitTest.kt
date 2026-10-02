@@ -356,7 +356,7 @@ class ExampleUnitTest {
             id = "d1",
             name = "Youth Color Belts",
             rankRange = 1..5,
-            ageRange = 10..14
+            ageRange = 0..13
         )
         val lateEntry = competitor("c9", "Jordan")
 
@@ -685,7 +685,7 @@ class ExampleUnitTest {
             id = "d1",
             name = "Youth Color Belts",
             rankRange = 1..5,
-            ageRange = 10..14,
+            ageRange = 0..13,
             competitors = competitors.toMutableList()
         )
     }

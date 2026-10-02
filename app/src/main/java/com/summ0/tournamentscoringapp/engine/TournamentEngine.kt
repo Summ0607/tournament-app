@@ -517,7 +517,7 @@ object TournamentEngine {
             id = "sample-division",
             name = "Sample Color Belt Division",
             rankRange = 1..5,
-            ageRange = 10..14
+            ageRange = 0..13
         )
 
         val competitors = (1..13).map { index ->
