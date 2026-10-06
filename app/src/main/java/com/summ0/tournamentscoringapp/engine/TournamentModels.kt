@@ -275,6 +275,7 @@ data class RingAssignment(
     val serverBaseUrl: String,
     val eventName: String = "",
     val eventNameSource: String = "",
+    val groupDivisionNumber: Int? = null,
     val currentGroup: RemoteGroup?,
     val currentPhase: String = "",
     val phasePlan: String = "",
@@ -292,8 +293,8 @@ data class RingAssignment(
     val ringEstimated: String = "",
     val ringPacePercent: Int = 0,
     val phaseHistory: List<PhaseTiming> = emptyList(),
-    val queuedGroupIds: List<String>,
-    val completedGroupIds: List<String>
+    val queuedGroupDivisionNumbers: List<Int> = emptyList(),
+    val completedGroupDivisionNumbers: List<Int> = emptyList()
 )
 
 data class RingAssignmentFetchResult(

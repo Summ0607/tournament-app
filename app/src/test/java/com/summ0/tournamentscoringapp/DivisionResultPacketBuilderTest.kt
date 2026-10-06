@@ -81,10 +81,14 @@ class DivisionResultPacketBuilderTest {
             "redParticipantId",
             "winnerParticipantId",
             "outcome",
-            "bluePoints",
-            "redPoints",
-            "blueWarnings",
-            "redWarnings",
+            "blueRawPoints",
+            "blueAdjustedPoints",
+            "blueStandardWarnings",
+            "blueSevereWarnings",
+            "redRawPoints",
+            "redAdjustedPoints",
+            "redStandardWarnings",
+            "redSevereWarnings",
             "elapsedSeconds",
             "blueDisqualified",
             "redDisqualified",
@@ -284,7 +288,7 @@ class DivisionResultPacketBuilderTest {
         )
         return sampleRequest().copy(
             signatures = listOf(
-                SignatureEntry(name = "Jordan Smith", dan = "5th Dan", role = "Referee", signedAt = "")
+                SignatureEntry(name = "Jordan Smith", rank = "5th", number = "Dan", role = "Referee", signedAt = "")
             ),
             sparringTournament = SparringTournamentResult(
                 rounds = listOf(

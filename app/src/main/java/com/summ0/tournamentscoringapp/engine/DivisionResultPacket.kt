@@ -494,6 +494,27 @@ private fun DivisionResultPacketFormsDiscipline.toJson(): JSONObject {
     }
 }
 
+internal fun buildFrozenCompletionSubmissionPayload(
+    packetJson: JSONObject,
+    completionSnapshot: JSONObject
+): JSONObject {
+    val packetCopy = JSONObject(packetJson.toString())
+    val snapshotCopy = JSONObject(completionSnapshot.toString())
+    val packetBlockCopy = JSONObject(packetJson.toString()).apply {
+        remove("schemaVersion")
+        remove("eventName")
+        remove("groupId")
+        remove("groupDivisionNumber")
+        remove("groupName")
+        remove("ringId")
+        remove("ringLabel")
+        remove("completedAt")
+    }
+    snapshotCopy.put("packetBlock", packetBlockCopy)
+    packetCopy.put("completionSnapshot", snapshotCopy)
+    return packetCopy
+}
+
 private fun DivisionResultPacketFormsResult.toJson(): JSONObject {
     return JSONObject().apply {
         put("participantId", participantId)

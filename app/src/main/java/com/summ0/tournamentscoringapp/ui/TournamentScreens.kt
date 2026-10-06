@@ -76,9 +76,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -129,6 +130,45 @@ import kotlinx.coroutines.delay
 internal const val EXTRA_LAUNCH_SCREEN = "com.summ0.tournamentscoringapp.extra.LAUNCH_SCREEN"
 internal const val LAUNCH_SCREEN_HYUNGS = "hyungs"
 internal const val LAUNCH_SCREEN_WEAPONS = "weapons"
+
+internal data class ImportedPhaseHistoryState(
+    val phaseName: String,
+    val phaseStartedAt: String,
+    val history: List<PhaseTiming>
+)
+
+internal fun normalizeImportedPhaseHistory(
+    phaseHistory: List<PhaseTiming>,
+    currentPhaseName: String,
+    currentPhaseStartTime: String
+): ImportedPhaseHistoryState {
+    val resolvedPhaseName = currentPhaseName.trim().ifBlank {
+        phaseHistory.lastOrNull()?.name.orEmpty()
+    }.ifBlank {
+        "setup"
+    }
+
+    val matchingPhaseEntries = phaseHistory.filter {
+        it.name.trim().equals(resolvedPhaseName, ignoreCase = true)
+    }
+
+    val importedHistory = phaseHistory.filterNot {
+        it.endTime.isNullOrBlank() &&
+            it.name.trim().equals(resolvedPhaseName, ignoreCase = true)
+    }
+
+    val resolvedStartedAt = currentPhaseStartTime.trim().ifBlank {
+        matchingPhaseEntries.firstOrNull()?.startTime.orEmpty()
+    }.ifBlank {
+        Instant.now().toString()
+    }
+
+    return ImportedPhaseHistoryState(
+        phaseName = resolvedPhaseName,
+        phaseStartedAt = resolvedStartedAt,
+        history = importedHistory
+    )
+}
 
 private fun heartbeatProgressSnapshot(completedCount: Int, totalCount: Int): HeartbeatProgressSnapshot {
     return HeartbeatProgressSnapshot(
@@ -202,7 +242,7 @@ private fun heartbeatProgressForPhase(
     hyungsFinalizeState: PlacementFinalizeState
 ): HeartbeatProgressSnapshot {
     return when (phase) {
-        "check-in", "setup" -> setupHeartbeatProgress(competitors)
+        "setup" -> setupHeartbeatProgress(competitors)
         "weapons" -> scoringHeartbeatProgress(weaponsSheetCompetitors, weaponsScoresByCompetitor)
         "hyungs" -> scoringHeartbeatProgress(hyungsSheetCompetitors, hyungsScoresByCompetitor)
         "sparring" -> sparringHeartbeatProgress(
@@ -255,7 +295,7 @@ internal fun CheckInScreen(
     var useOnlyThreeJudges by rememberSaveable { mutableStateOf(false) }
     val currentScreenState = rememberSaveable(stateSaver = competitionScreenSaver) { mutableStateOf(initialScreen) }
     val currentScreen: CompetitionScreen = currentScreenState.value
-    val controlBoardPhaseState = rememberSaveable { mutableStateOf("check-in") }
+    val controlBoardPhaseState = rememberSaveable { mutableStateOf("setup") }
     val controlBoardPhase: String = controlBoardPhaseState.value
     val weaponsScoresByCompetitor = remember { mutableStateMapOf<String, List<String>>() }
     val hyungsScoresByCompetitor = remember { mutableStateMapOf<String, List<String>>() }
@@ -304,6 +344,8 @@ internal fun CheckInScreen(
     var currentRingId by rememberSaveable { mutableStateOf("") }
     var currentRingLabel by rememberSaveable { mutableStateOf("") }
     var currentRingAssignment by remember { mutableStateOf<RingAssignment?>(null) }
+    val controlBoardPhaseHistory = remember { mutableStateListOf<PhaseTiming>() }
+    var controlBoardPhaseStartedAt by rememberSaveable { mutableStateOf(Instant.now().toString()) }
     val currentGroupBannerState = rememberSaveable(stateSaver = groupBannerSaver) { mutableStateOf(GroupBanner()) }
     val currentGroupBanner: GroupBanner = currentGroupBannerState.value
     var showAssistanceDialog by remember { mutableStateOf(false) }
@@ -377,6 +419,65 @@ internal fun CheckInScreen(
         hyungsFinalizeState = hyungsFinalizeState
     )
 
+    fun phaseTimingEstimateContext(phaseName: String): PhaseTimingEstimateContext {
+        return when (phaseName.trim().lowercase(Locale.US)) {
+            "setup" -> PhaseTimingEstimateContext(totalCompetitors = competitors.size)
+            "weapons" -> PhaseTimingEstimateContext(participatingCompetitors = weaponsSheetCompetitors.size)
+            "hyungs" -> PhaseTimingEstimateContext(participatingCompetitors = hyungsSheetCompetitors.size)
+            "sparring" -> PhaseTimingEstimateContext(
+                actualBoutCount = buildSparringBracketSummary(
+                    round0Bouts = sparringRound0Bouts,
+                    winnersByRound = sparringWinners,
+                    competitorCount = sparringCompetitors.size
+                ).actualBoutCount
+            )
+            "awards" -> PhaseTimingEstimateContext(
+                awardBlockCount = buildOverallAwardsSummary(
+                    competitors = competitors,
+                    weaponsLabels = weaponsFinalizeState.labels,
+                    weaponsScoresByCompetitor = weaponsScoresByCompetitor,
+                    hyungsLabels = hyungsFinalizeState.labels,
+                    hyungsScoresByCompetitor = hyungsScoresByCompetitor,
+                    sparringWinners = sparringWinners,
+                    round0Bouts = sparringRound0Bouts
+                ).let { summary ->
+                    listOf(summary.weapons, summary.hyungs, summary.sparring).count { it.isNotEmpty() }
+                }
+            )
+            else -> PhaseTimingEstimateContext(participatingCompetitors = competitors.size)
+        }
+    }
+
+    fun clearControlBoardPhaseHistory() {
+        controlBoardPhaseHistory.clear()
+    }
+
+    fun resetControlBoardPhaseHistory(phaseName: String = "setup", startedAt: String = Instant.now().toString()) {
+        controlBoardPhaseState.value = phaseName
+        controlBoardPhaseStartedAt = startedAt
+    }
+
+    fun appendCurrentPhaseToHistory(completedAt: String = Instant.now().toString()) {
+        if (controlBoardPhase.isBlank() || controlBoardPhaseStartedAt.isBlank()) return
+        controlBoardPhaseHistory.add(buildPhaseTimingEntry(
+            name = controlBoardPhase,
+            startTime = controlBoardPhaseStartedAt,
+            endTime = completedAt,
+            estimateContext = phaseTimingEstimateContext(controlBoardPhase)
+        ))
+    }
+
+    fun snapshotPhaseHistory(): List<PhaseTiming> {
+        return controlBoardPhaseHistory.toList()
+    }
+
+    fun transitionControlBoardPhase(nextPhase: String) {
+        if (nextPhase == controlBoardPhase) return
+        appendCurrentPhaseToHistory()
+        controlBoardPhaseState.value = nextPhase
+        controlBoardPhaseStartedAt = Instant.now().toString()
+    }
+
     fun resetCompetitionState() {
         lockedPhases = emptySet()
         phaseEntrants = emptyMap()
@@ -392,6 +493,8 @@ internal fun CheckInScreen(
         sparringWinners.clear()
         sparringBoutProgress.clear()
         activeSparringBout = null
+        clearControlBoardPhaseHistory()
+        resetControlBoardPhaseHistory()
         currentScreenState.value = CompetitionScreen.CHECK_IN
     }
 
@@ -420,7 +523,7 @@ internal fun CheckInScreen(
             groupDivisionNumber = divisionNumber,
             groupDivisionName = divisionName
         )
-        controlBoardPhaseState.value = "check-in"
+        resetControlBoardPhaseHistory("setup")
     }
 
     fun clearLoadedGroup() {
@@ -428,7 +531,7 @@ internal fun CheckInScreen(
         resetDivisionState()
         competitorsState.value = emptyList()
         currentGroupBannerState.value = GroupBanner()
-        controlBoardPhaseState.value = "check-in"
+        resetControlBoardPhaseHistory("setup")
     }
 
     fun markUnassignedAssignment() {
@@ -436,7 +539,7 @@ internal fun CheckInScreen(
         resetDivisionState()
         competitorsState.value = emptyList()
         currentGroupBannerState.value = GroupBanner()
-        controlBoardPhaseState.value = "check-in"
+        resetControlBoardPhaseHistory("setup")
         currentRingAssignment = null
         remoteStatus = "Unassigned"
     }
@@ -446,7 +549,7 @@ internal fun CheckInScreen(
         resetDivisionState()
         competitorsState.value = emptyList()
         currentGroupBannerState.value = GroupBanner()
-        controlBoardPhaseState.value = "check-in"
+        resetControlBoardPhaseHistory("setup")
         remoteStatus = "Pending Assignment"
     }
 
@@ -455,7 +558,7 @@ internal fun CheckInScreen(
         resetDivisionState()
         competitorsState.value = emptyList()
         currentGroupBannerState.value = GroupBanner()
-        controlBoardPhaseState.value = "check-in"
+        resetControlBoardPhaseHistory("setup")
         currentRingId = ""
         currentRingLabel = ""
         currentRingAssignment = null
@@ -469,10 +572,10 @@ internal fun CheckInScreen(
         currentScreenState.value = nextScreen
         if (nextScreen == CompetitionScreen.CHECK_IN) {
             if (resetControlBoardPhase) {
-                controlBoardPhaseState.value = "check-in"
+                resetControlBoardPhaseHistory("setup")
             }
         } else {
-            controlBoardPhaseState.value = screenPhase(nextScreen)
+            transitionControlBoardPhase(screenPhase(nextScreen))
         }
     }
 
@@ -622,34 +725,22 @@ internal fun CheckInScreen(
                     eventNameSource = "active-event-api:${activeEventResult.source}"
                 )
             } else {
-                Log.w(
-                    "CompleteRoundTrace",
-                    "Active event unresolved for ringId=${assignment.ringId} " +
-                        "status=${activeEventResult.httpStatusCode?.toString().orEmpty()} " +
-                        "body=${activeEventResult.responseBody.ifBlank { "<empty>" }}"
-                )
                 assignment.copy(eventNameSource = "active-event-api:unresolved")
             }
         }
 
         currentRingAssignment = resolvedAssignment
-        Log.d(
-            COMPLETE_ROUND_TRACE_TAG,
-            "Ring assigned: ringId=${resolvedAssignment.ringId} " +
-                "eventNameSource=${resolvedAssignment.eventNameSource} " +
-                "eventName=${resolvedAssignment.eventName.ifBlank { "<unresolved>" }}"
-        )
         markRingConnectionHealthy()
 
         val nextGroup = resolvedAssignment.currentGroup
-        val currentGroupDivisionNumber = currentGroupBanner.groupDivisionNumber
+        val groupDivisionNumber = currentGroupBanner.groupDivisionNumber
         val currentGroupDivisionName = currentGroupBanner.groupDivisionName
         when {
             nextGroup != null && (!preserveLoadedGroup || !currentGroupBanner.isLoaded) -> {
                 applyLoadedGroup(nextGroup)
             }
             nextGroup != null && currentGroupBanner.isLoaded && (
-                nextGroup.effectiveDivisionNumber() != currentGroupDivisionNumber ||
+                nextGroup.effectiveDivisionNumber() != groupDivisionNumber ||
                     nextGroup.effectiveDivisionName() != currentGroupDivisionName
                 ) -> {
                 applyLoadedGroup(nextGroup)
@@ -661,6 +752,16 @@ internal fun CheckInScreen(
                 markPendingAssignment()
             }
         }
+
+        val importedPhaseHistory = normalizeImportedPhaseHistory(
+            phaseHistory = resolvedAssignment.phaseHistory,
+            currentPhaseName = resolvedAssignment.currentPhaseName.ifBlank { resolvedAssignment.currentPhase },
+            currentPhaseStartTime = resolvedAssignment.currentPhaseStartTime
+        )
+        controlBoardPhaseHistory.clear()
+        controlBoardPhaseHistory.addAll(importedPhaseHistory.history)
+        controlBoardPhaseState.value = importedPhaseHistory.phaseName
+        controlBoardPhaseStartedAt = importedPhaseHistory.phaseStartedAt
     }
 
     fun connectSelectedRing(onSuccess: (() -> Unit)? = null) {
@@ -743,17 +844,31 @@ internal fun CheckInScreen(
 
             isCompletingGroup = true
             remoteStatus = "Loading next group: building packet..."
+            val completionTimestamp = Instant.now().toString()
+            appendCurrentPhaseToHistory(completionTimestamp)
+            val completionPhaseHistory = snapshotPhaseHistory()
+            val completionSnapshot = buildCompletionTelemetrySnapshot(
+                ringAssignment = currentRingAssignment,
+                progress = currentHeartbeatProgress,
+                currentPhase = controlBoardPhase,
+                phaseHistory = completionPhaseHistory,
+                checkInCount = checkedInCount,
+                checkInTotal = competitors.size,
+                completedAt = completionTimestamp
+            )
             val submissionResult = mainViewModel.finalizeAndSubmitResults(
                 serverBaseUrl = serverBaseUrl,
-                request = request
+                request = request,
+                completionSnapshot = completionSnapshot
             )
             when (submissionResult) {
                 is DivisionResultSubmissionResult.Accepted -> {
                     remoteStatus = "Loading next group: saving results..."
                     markRingConnectionHealthy()
                     if (snapshotBytes != null && snapshotMimeType != null) {
-                        val receiptPacket = serializeDivisionResultPacket(
-                            DivisionResultPacketBuilder.build(request)
+                        val receiptPacket = buildFrozenCompletionSubmissionPayload(
+                            serializeDivisionResultPacket(DivisionResultPacketBuilder.build(request)),
+                            completionSnapshot
                         )
                         persistDivisionPacketReceipt(
                             context = appContext,
@@ -763,6 +878,7 @@ internal fun CheckInScreen(
                         )
                     }
 
+                    appendCurrentPhaseToHistory(completionTimestamp)
                     val refreshedAssignment = fetchRingAssignment(
                         "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/current"
                     ).assignment
@@ -1858,25 +1974,30 @@ private fun CheckInHeaderCard(
                     fontSize = bodySize
                 )
             }
-            Text(
-                text = if (currentRingLabel.isNotBlank()) {
-                    "Ring: $currentRingLabel"
-                } else {
-                    "Ring: Not Assigned"
-                },
-                fontWeight = FontWeight.SemiBold,
-                fontSize = labelSize
-            )
-            ringAssignment?.let { assignment ->
-                val paceLabel = ringPaceLabel(
-                    elapsed = assignment.ringElapsed,
-                    estimated = assignment.ringEstimated
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(if (dense) 12.dp else 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (currentRingLabel.isNotBlank()) {
+                        "Ring: $currentRingLabel"
+                    } else {
+                        "Ring: Not Assigned"
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = labelSize
                 )
-                if (paceLabel != null) {
-                    Text(
-                        text = "Ring Pace: $paceLabel",
-                        fontSize = bodySize
+                ringAssignment?.let { assignment ->
+                    val paceLabel = ringPaceLabel(
+                        elapsed = assignment.ringElapsed,
+                        estimated = assignment.ringEstimated
                     )
+                    if (paceLabel != null) {
+                        Text(
+                            text = "Ring Pace: $paceLabel",
+                            fontSize = bodySize
+                        )
+                    }
                 }
             }
             Row(
@@ -3787,6 +3908,14 @@ private fun OverallAwardsScreen(
                         )
                         return@Button
                     }
+                    val activeGroupDivisionNumber = groupBanner.groupDivisionNumber
+                    if (activeGroupDivisionNumber == null || activeGroupDivisionNumber <= 0) {
+                        Log.w(
+                            COMPLETE_ROUND_TRACE_TAG,
+                            "Complete Round blocked: unresolved groupDivisionNumber for ringId=$ringId"
+                        )
+                        return@Button
+                    }
                     val uploadRequest = buildDivisionResultPacketBuildRequest(
                         groupBanner = groupBanner,
                         activeEventName = canonicalEventName,
@@ -4718,8 +4847,8 @@ private fun buildDivisionResultPacketBuildRequest(
     completedAt: String
 ): DivisionResultPacketBuildRequest {
     val divisionNumber = groupBanner.groupDivisionNumber
-        ?: divisionId.toIntOrNull()
-        ?: 0
+        ?: error("Active ring groupDivisionNumber is required")
+    require(divisionNumber > 0) { "Active ring groupDivisionNumber must be positive" }
     val groupName = groupBanner.groupDivisionName?.takeIf { it.isNotBlank() } ?: divisionType
     val eventName = activeEventName.trim()
     require(eventName.isNotBlank()) { "Active event name is required" }
@@ -4745,7 +4874,7 @@ private fun buildDivisionResultPacketBuildRequest(
 
     return DivisionResultPacketBuildRequest(
         eventName = eventName,
-        groupId = divisionNumber.takeIf { it > 0 }?.toString() ?: divisionId,
+        groupId = divisionNumber.toString(),
         groupDivisionNumber = divisionNumber,
         groupName = groupName,
         ringId = ringId,
@@ -4837,6 +4966,7 @@ private fun buildSparringTournamentResult(
                 winner != null -> SparringOutcome.FIRST_TO_THREE
                 else -> SparringOutcome.IN_PROGRESS
             }
+
             SparringBoutResult(
                 bout = packetBout,
                 competitorAResult = SparringCompetitorResult(
@@ -4876,6 +5006,86 @@ private fun buildSparringTournamentResult(
         champion = champion,
         bracketSize = round0Bouts.size * 2
     )
+}
+
+internal fun buildCompletionTelemetrySnapshot(
+    ringAssignment: RingAssignment?,
+    progress: HeartbeatProgressSnapshot,
+    currentPhase: String,
+    phaseHistory: List<PhaseTiming>,
+    checkInCount: Int,
+    checkInTotal: Int,
+    completedAt: String
+): JSONObject {
+    val completedPhaseHistory = phaseHistory.toList()
+    val phaseCompletedCount = completedPhaseHistory.size
+    val phaseTotalCount = phaseCompletedCount
+    val phaseProgress = if (phaseTotalCount <= 0) 0 else 100
+    val ringElapsedSeconds = completedPhaseHistory.sumOf { parseDurationSeconds(it.elapsed) ?: 0 }
+    val ringEstimatedSeconds = completedPhaseHistory.sumOf { parseDurationSeconds(it.estimated) ?: 0 }
+    val ringElapsed = if (ringElapsedSeconds > 0) {
+        formatDurationSeconds(ringElapsedSeconds)
+    } else {
+        completedPhaseHistory.lastOrNull()?.endTime?.let { endTime ->
+            val startTime = completedPhaseHistory.firstOrNull()?.startTime.orEmpty()
+            if (startTime.isNotBlank()) formatElapsedDuration(startTime, endTime) else ""
+        }.orEmpty()
+    }
+    val ringEstimated = if (ringEstimatedSeconds > 0) {
+        formatDurationSeconds(ringEstimatedSeconds)
+    } else {
+        "0:00"
+    }
+    val ringPacePercent = calculateRingPacePercent(ringElapsedSeconds, ringEstimatedSeconds)
+
+    return JSONObject().apply {
+        put("currentPhase", currentPhase)
+        put("checkInCount", checkInCount)
+        put("checkInTotal", checkInTotal)
+        put("phaseCompletedCount", phaseCompletedCount)
+        put("phaseTotalCount", phaseTotalCount)
+        put("phaseProgress", phaseProgress)
+        put("ringElapsed", ringElapsed)
+        put("ringEstimated", ringEstimated)
+        put("ringPacePercent", ringPacePercent)
+        put("telemetry", JSONObject().apply {
+            put("checkInCount", checkInCount)
+            put("checkInTotal", checkInTotal)
+            put("phaseProgress", phaseProgress)
+            put("currentPhaseCompletedCount", ringAssignment?.currentPhaseCompletedCount ?: 0)
+            put("currentPhaseTotalCount", ringAssignment?.currentPhaseTotalCount ?: 0)
+            put("currentPhaseStartTime", ringAssignment?.currentPhaseStartTime.orEmpty())
+            put("currentPhaseEndTime", ringAssignment?.currentPhaseEndTime)
+            put("currentPhaseElapsed", ringAssignment?.currentPhaseElapsed.orEmpty())
+            put("currentPhaseEstimated", ringAssignment?.currentPhaseEstimated.orEmpty())
+            put("ringElapsed", ringElapsed)
+            put("ringEstimated", ringEstimated)
+            put("ringPacePercent", ringPacePercent)
+            put("sparringByeCount", ringAssignment?.sparringByeCount ?: 0)
+            put("sparringActualBoutCount", ringAssignment?.sparringActualBoutCount ?: 0)
+            put("sparringCompletedBoutCount", ringAssignment?.sparringCompletedBoutCount ?: 0)
+            put("groupDivisionNumber", ringAssignment?.groupDivisionNumber)
+            put("ringId", ringAssignment?.ringId.orEmpty())
+        })
+        put("phaseHistory", JSONArray().apply {
+            phaseHistory.forEach { phase ->
+                put(JSONObject().apply {
+                    put("name", phase.name)
+                    put("startTime", phase.startTime)
+                    put("endTime", phase.endTime)
+                    put("elapsed", phase.elapsed)
+                    put("estimated", phase.estimated)
+                })
+            }
+        })
+    }
+}
+
+private fun calculateRingPacePercent(actualSeconds: Int, estimatedSeconds: Int): Int {
+    if (estimatedSeconds <= 0) return 0
+    return ((actualSeconds.toDouble() / estimatedSeconds.toDouble()) * 100.0)
+        .roundToInt()
+        .coerceAtLeast(0)
 }
 
 internal fun orderedSummaryPlacements(
@@ -5650,6 +5860,18 @@ private fun parseDurationSeconds(duration: String): Int? {
             hours * 3600 + minutes * 60 + seconds
         }
         else -> null
+    }
+}
+
+private fun formatDurationSeconds(totalSeconds: Int): String {
+    val safeSeconds = totalSeconds.coerceAtLeast(0)
+    val hours = safeSeconds / 3600
+    val minutes = (safeSeconds % 3600) / 60
+    val seconds = safeSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%d:%02d", minutes, seconds)
     }
 }
 

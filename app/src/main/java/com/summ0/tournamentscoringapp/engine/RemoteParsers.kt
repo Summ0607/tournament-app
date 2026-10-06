@@ -86,20 +86,73 @@ fun JSONObject.optStringList(key: String): List<String> {
     return result
 }
 
+internal data class ParsedRingAssignmentState(
+    val groupDivisionNumber: Int?,
+    val queuedGroupDivisionNumbers: List<Int>,
+    val completedGroupDivisionNumbers: List<Int>
+)
+
+internal fun JSONObject.parseRingAssignmentState(currentGroup: RemoteGroup? = null): ParsedRingAssignmentState {
+    return ParsedRingAssignmentState(
+        groupDivisionNumber = optPositiveInt("groupDivisionNumber") ?: currentGroup?.effectiveDivisionNumber(),
+        queuedGroupDivisionNumbers = optPositiveIntList("queuedGroupDivisionNumbers"),
+        completedGroupDivisionNumbers = optPositiveIntList("completedGroupDivisionNumbers")
+    )
+}
+
+internal fun JSONObject.optPositiveInt(key: String): Int? {
+    if (!has(key) || isNull(key)) return null
+    return when (val value = opt(key)) {
+        is Number -> value.toInt()
+        is String -> value.trim().toIntOrNull()
+        else -> null
+    }?.takeIf { it > 0 }
+}
+
+internal fun JSONObject.optPositiveIntList(key: String): List<Int> {
+    val array = optJSONArray(key) ?: return emptyList()
+    val values = buildList {
+        for (index in 0 until array.length()) {
+            val resolved = when (val rawValue = array.opt(index)) {
+                is Number -> rawValue.toInt()
+                is String -> rawValue.trim().toIntOrNull()
+                else -> null
+            }?.takeIf { it > 0 }
+            if (resolved != null) add(resolved)
+        }
+    }
+    return values
+}
+
 fun parsePhaseTimingList(root: JSONObject): List<PhaseTiming> {
     val values = root.optJSONArray("phaseHistory") ?: return emptyList()
+    val totalCompetitors = root.optJSONObject("currentGroup")
+        ?.optJSONArray("competitors")
+        ?.length()
+        ?: 0
     val result = mutableListOf<PhaseTiming>()
     for (index in 0 until values.length()) {
         val entry = values.optJSONObject(index) ?: continue
         val name = entry.optString("name", "").trim()
         val startTime = entry.optString("startTime", "").trim()
         if (name.isEmpty() || startTime.isEmpty()) continue
+        val normalizedName = if (name.equals("check-in", ignoreCase = true)) "setup" else name
+        val estimated = if (normalizedName.equals("setup", ignoreCase = true)) {
+            estimatePhaseDuration(
+                normalizedName,
+                PhaseTimingEstimateContext(totalCompetitors = totalCompetitors)
+            )
+        } else {
+            entry.optString("estimated", "").trim().ifBlank {
+                estimatePhaseDuration(normalizedName)
+            }
+        }
         result += PhaseTiming(
-            name = name,
+            name = normalizedName,
             startTime = startTime,
             endTime = entry.optNullableString("endTime"),
             elapsed = entry.optString("elapsed", "").trim(),
-            estimated = entry.optString("estimated", "").trim()
+            estimated = estimated
         )
     }
     return result

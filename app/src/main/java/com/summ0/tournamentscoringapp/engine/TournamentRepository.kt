@@ -110,6 +110,8 @@ suspend fun fetchRingAssignment(
         val serverBaseUrl = root.optString("serverBaseUrl", "").trim().ifEmpty {
             deriveServerBaseUrl(urlString)
         }
+        val currentGroup = root.optJSONObject("currentGroup")?.let(::parseRemoteGroup)
+        val ringState = root.parseRingAssignmentState(currentGroup)
         RingAssignmentFetchResult(
             assignment = RingAssignment(
                 ringId = ringId,
@@ -122,7 +124,8 @@ suspend fun fetchRingAssignment(
                         root.optString("activeEventName", root.optString("tournamentName", ""))
                     )
                 ).trim(),
-                currentGroup = root.optJSONObject("currentGroup")?.let(::parseRemoteGroup),
+                groupDivisionNumber = ringState.groupDivisionNumber,
+                currentGroup = currentGroup,
                 currentPhase = root.optString("currentPhase", "").trim(),
                 phasePlan = root.opt("phasePlan").let { value ->
                     if (value == null || value == JSONObject.NULL) "" else value.toString()
@@ -141,8 +144,8 @@ suspend fun fetchRingAssignment(
                 ringEstimated = root.optString("ringEstimated", "").trim(),
                 ringPacePercent = root.optInt("ringPacePercent", 0),
                 phaseHistory = parsePhaseTimingList(root),
-                queuedGroupIds = root.optStringList("queuedGroupIds"),
-                completedGroupIds = root.optStringList("completedGroupIds")
+                queuedGroupDivisionNumbers = ringState.queuedGroupDivisionNumbers,
+                completedGroupDivisionNumbers = ringState.completedGroupDivisionNumbers
             )
         )
     } catch (exception: Exception) {
@@ -317,9 +320,9 @@ suspend fun fetchServerVersionCode(serverBaseUrl: String): Int {
 
 data class DivisionResultSubmissionRingAssignment(
     val ringId: String,
-    val currentGroupId: String? = null,
-    val queuedGroupIds: List<String> = emptyList(),
-    val completedGroupIds: List<String> = emptyList(),
+    val groupDivisionNumber: Int? = null,
+    val queuedGroupDivisionNumbers: List<Int> = emptyList(),
+    val completedGroupDivisionNumbers: List<Int> = emptyList(),
     val currentPhaseName: String = "",
     val currentPhaseStartTime: String = "",
     val currentPhaseEndTime: String? = null,
@@ -408,25 +411,13 @@ suspend fun submitDivisionResult(
                         submissionId = root.optString("submissionId", JSONObject(packetJsonText).optString("submissionId", "")),
                         receivedAt = root.optString("receivedAt", ""),
                         ringAssignment = root.optJSONObject("ringAssignment")?.let { ring ->
+                            val currentGroup = ring.optJSONObject("currentGroup")?.let(::parseRemoteGroup)
+                            val ringState = ring.parseRingAssignmentState(currentGroup)
                             DivisionResultSubmissionRingAssignment(
                                 ringId = ring.optString("ringId", ringId),
-                                currentGroupId = ring.optString("currentGroupId", "").trim().ifBlank { null },
-                                queuedGroupIds = ring.optJSONArray("queuedGroupIds")?.let { array ->
-                                    buildList {
-                                        for (index in 0 until array.length()) {
-                                            val value = array.optString(index, "").trim()
-                                            if (value.isNotEmpty()) add(value)
-                                        }
-                                    }
-                                } ?: emptyList(),
-                                completedGroupIds = ring.optJSONArray("completedGroupIds")?.let { array ->
-                                    buildList {
-                                        for (index in 0 until array.length()) {
-                                            val value = array.optString(index, "").trim()
-                                            if (value.isNotEmpty()) add(value)
-                                        }
-                                    }
-                                } ?: emptyList(),
+                                groupDivisionNumber = ringState.groupDivisionNumber,
+                                queuedGroupDivisionNumbers = ringState.queuedGroupDivisionNumbers,
+                                completedGroupDivisionNumbers = ringState.completedGroupDivisionNumbers,
                                 currentPhaseName = ring.optString("currentPhaseName", ring.optString("currentPhase", "")).trim(),
                                 currentPhaseStartTime = ring.optString("currentPhaseStartTime", "").trim(),
                                 currentPhaseEndTime = ring.optNullableString("currentPhaseEndTime"),

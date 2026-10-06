@@ -61,9 +61,12 @@ class DivisionResultPacketStore(private val baseDir: File) {
         val sentPacketFile = File(sentPacketDir, "packet.json")
         val sentResponseFile = File(sentPacketDir, "response.json")
         val sentMetadataFile = File(sentPacketDir, "metadata.json")
+        val sanitizedResponse = JSONObject(serverResponse.toString()).apply {
+            remove("status")
+        }
 
         packetFile.copyTo(sentPacketFile, overwrite = true)
-        serverResponse.toString(2).let(sentResponseFile::writeText)
+        sanitizedResponse.toString(2).let(sentResponseFile::writeText)
         if (metadataFile(submissionId).exists()) {
             metadataFile(submissionId).copyTo(sentMetadataFile, overwrite = true)
         }

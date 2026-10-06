@@ -7,6 +7,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.summ0.tournamentscoringapp.BuildConfig
+import java.time.Duration
+import java.time.Instant
 import java.io.File
 import java.net.URL
 import java.util.Locale
@@ -87,11 +89,98 @@ fun deviceLabel(): String = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
 fun appVersionLabel(): String = "Version ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
 
 internal fun screenPhase(screen: CompetitionScreen): String = when (screen) {
-    CompetitionScreen.CHECK_IN -> "check-in"
+    CompetitionScreen.CHECK_IN -> "setup"
     CompetitionScreen.WEAPONS_SCORING -> "weapons"
     CompetitionScreen.HYUNGS_SCORING -> "hyungs"
     CompetitionScreen.SPARRING_BRACKET -> "sparring"
     CompetitionScreen.OVERALL_AWARDS -> "awards"
+}
+
+fun formatElapsedDuration(startTime: String, endTime: String): String {
+    val startedAt = runCatching { Instant.parse(startTime.trim()) }.getOrNull() ?: return ""
+    val endedAt = runCatching { Instant.parse(endTime.trim()) }.getOrNull() ?: return ""
+    val totalSeconds = Duration.between(startedAt, endedAt).seconds.coerceAtLeast(0)
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%d:%02d", minutes, seconds)
+    }
+}
+
+internal fun buildPhaseTimingEntry(
+    name: String,
+    startTime: String,
+    endTime: String? = null,
+    estimated: String = "",
+    estimateContext: PhaseTimingEstimateContext = PhaseTimingEstimateContext()
+): PhaseTiming {
+    val completedAt = endTime ?: Instant.now().toString()
+    return PhaseTiming(
+        name = name,
+        startTime = startTime,
+        endTime = completedAt,
+        elapsed = formatElapsedDuration(startTime, completedAt),
+        estimated = estimated.ifBlank { estimatePhaseDuration(name, estimateContext) }
+    )
+}
+
+internal fun appendCompletedPhaseTiming(
+    history: List<PhaseTiming>,
+    name: String,
+    startTime: String,
+    completedAt: String,
+    estimated: String = "",
+    estimateContext: PhaseTimingEstimateContext = PhaseTimingEstimateContext()
+): List<PhaseTiming> {
+    if (name.isBlank() || startTime.isBlank()) return history
+    return history + buildPhaseTimingEntry(
+        name = name,
+        startTime = startTime,
+        endTime = completedAt,
+        estimated = estimated,
+        estimateContext = estimateContext
+    )
+}
+
+data class PhaseTimingEstimateContext(
+    val totalCompetitors: Int = 0,
+    val participatingCompetitors: Int = 0,
+    val actualBoutCount: Int = 0,
+    val awardBlockCount: Int = 0
+)
+
+internal fun estimatePhaseDuration(
+    phaseName: String,
+    estimateContext: PhaseTimingEstimateContext = PhaseTimingEstimateContext()
+): String {
+    val normalizedPhase = phaseName.trim().lowercase(Locale.US)
+    val estimatedSeconds = when {
+        normalizedPhase.contains("setup") -> 120 + (estimateContext.totalCompetitors.coerceAtLeast(0) * 15)
+        normalizedPhase.contains("check") -> 0
+        normalizedPhase.contains("hyung") || normalizedPhase.contains("weapons") ->
+            estimateContext.participatingCompetitors.coerceAtLeast(0) * 90
+        normalizedPhase.contains("sparring") ->
+            estimateContext.actualBoutCount.coerceAtLeast(0) * 90
+        normalizedPhase.contains("award") ->
+            240 + (estimateContext.awardBlockCount.coerceAtLeast(0) * 60)
+        else -> estimateContext.participatingCompetitors.coerceAtLeast(0) * 30
+    }
+    return formatDurationSeconds(estimatedSeconds)
+}
+
+internal fun formatDurationSeconds(totalSeconds: Int): String {
+    val safeSeconds = totalSeconds.coerceAtLeast(0)
+    val hours = safeSeconds / 3600
+    val minutes = (safeSeconds % 3600) / 60
+    val seconds = safeSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%d:%02d", minutes, seconds)
+    }
 }
 
 fun IntRange.displayLabel(): String {

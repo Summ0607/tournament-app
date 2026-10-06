@@ -6,6 +6,7 @@ import com.summ0.tournamentscoringapp.engine.DivisionResultPacketBuilder
 import com.summ0.tournamentscoringapp.engine.DivisionResultPacketStore
 import com.summ0.tournamentscoringapp.engine.DivisionResultSubmissionResult
 import com.summ0.tournamentscoringapp.engine.DivisionResultSubmissionRingAssignment
+import com.summ0.tournamentscoringapp.engine.buildFrozenCompletionSubmissionPayload
 import com.summ0.tournamentscoringapp.engine.HeartbeatProgressSnapshot
 import com.summ0.tournamentscoringapp.engine.HttpProbeResult
 import com.summ0.tournamentscoringapp.engine.JsonFetchResult
@@ -63,6 +64,10 @@ class MainViewModel(
     private val submitter: suspend (String, String, JSONObject) -> DivisionResultSubmissionResult =
         { serverBaseUrl, ringId, packetJson -> submitDivisionResult(serverBaseUrl, ringId, packetJson) }
 ) {
+    private companion object {
+        private const val TAG = "DivisionResultUploader"
+    }
+
     var uploadStatus: DivisionResultUploadStatus = DivisionResultUploadStatus.Idle
         private set
 
@@ -108,28 +113,18 @@ class MainViewModel(
 
     suspend fun finalizeAndSubmitResults(
         serverBaseUrl: String,
-        request: DivisionResultPacketBuildRequest
+        request: DivisionResultPacketBuildRequest,
+        completionSnapshot: JSONObject? = null
     ): DivisionResultSubmissionResult {
-        Log.d(
-            "DivisionResultUploader",
-            "finalizeAndSubmitResults: eventName=${request.eventName} groupId=${request.groupId} " +
-                "groupDivisionNumber=${request.groupDivisionNumber} groupName=${request.groupName} " +
-                "competitors=${request.competitors.size} weaponsResults=${request.weaponsResults.size} " +
-                "hyungsResults=${request.hyungsResults.size} sparringRounds=${request.sparringTournament?.rounds?.size ?: 0} " +
-                "signatures=${request.signatures.size} weaponsFinalizeMessage=${request.weaponsFinalizeState?.message.orEmpty()} " +
-                "hyungsFinalizeMessage=${request.hyungsFinalizeState?.message.orEmpty()}"
-        )
         val packet = DivisionResultPacketBuilder.build(request)
-        Log.d(
-            "DivisionResultUploader",
-            "Packet built: submissionId=${packet.submissionId} participants=${packet.participants.size} " +
-                "weaponsResults=${packet.disciplines.weapons.results.size} hyungsResults=${packet.disciplines.hyungs.results.size} " +
-                "sparringRounds=${packet.disciplines.sparring.rounds.size}"
-        )
+        val packetJson = serializeDivisionResultPacket(packet)
+        val outgoingPacketJson = completionSnapshot?.let { snapshot ->
+            buildFrozenCompletionSubmissionPayload(packetJson, snapshot)
+        } ?: packetJson
         return submitPacket(
             serverBaseUrl = serverBaseUrl,
             ringId = request.ringId,
-            packetJson = serializeDivisionResultPacket(packet),
+            packetJson = outgoingPacketJson,
             submissionId = packet.submissionId
         )
     }
