@@ -702,7 +702,7 @@ internal fun CheckInScreen(
             markRingConnectionHealthy()
         } else {
             markRingConnectionNeedsReconnect(
-                "Connection lost. Reconnect Ring to restore contact."
+                result.errorMessage ?: "Connection lost. Reconnect Ring to restore contact."
             )
         }
     }
@@ -916,7 +916,7 @@ internal fun CheckInScreen(
                 }
                 is DivisionResultSubmissionResult.NetworkFailure -> {
                     markRingConnectionNeedsReconnect(
-                        "Connection lost. Reconnect Ring to restore contact."
+                        submissionResult.failure.message
                     )
                 }
             }
@@ -940,7 +940,7 @@ internal fun CheckInScreen(
                 showAssistanceDialog = false
             } else {
                 markRingConnectionNeedsReconnect(
-                    "Connection lost. Reconnect Ring to restore contact."
+                    result.errorMessage ?: "Connection lost. Reconnect Ring to restore contact."
                 )
             }
         }
@@ -961,7 +961,7 @@ internal fun CheckInScreen(
                 showAssistanceDialog = false
             } else {
                 markRingConnectionNeedsReconnect(
-                    "Connection lost. Reconnect Ring to restore contact."
+                    result.errorMessage ?: "Connection lost. Reconnect Ring to restore contact."
                 )
             }
         }
@@ -1531,16 +1531,24 @@ internal fun CheckInScreen(
                                 val apkFile = File(dir, "update.apk")
                                 withContext(Dispatchers.IO) {
                                     val conn = URL(apkUrl).openConnection() as HttpURLConnection
-                                    conn.connect()
-                                    conn.inputStream.use { input ->
-                                        apkFile.outputStream().use { output -> input.copyTo(output) }
+                                    conn.connectTimeout = 10_000
+                                    conn.readTimeout = 30_000
+                                    try {
+                                        conn.connect()
+                                        if (conn.responseCode !in 200..299) {
+                                            throw java.io.IOException("Server returned HTTP ${conn.responseCode} while downloading the APK.")
+                                        }
+                                        conn.inputStream.use { input ->
+                                            apkFile.outputStream().use { output -> input.copyTo(output) }
+                                        }
+                                    } finally {
+                                        conn.disconnect()
                                     }
-                                    conn.disconnect()
                                 }
                                 installApk(updateContext, apkFile)
                                 showUpdateDialog = false
                             } catch (e: Exception) {
-                                updateDownloadError = "Download failed: ${e.message}"
+                                updateDownloadError = "Download failed: ${describeNetworkError(e)}"
                             } finally {
                                 isDownloadingUpdate = false
                             }
@@ -2114,6 +2122,11 @@ private fun LaunchScreenPanel(
                 Text("Exit App")
             }
         }
+        Text(
+            text = appVersionLabel(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
@@ -3308,6 +3321,11 @@ private fun ServerConfigDialog(
                     fontSize = if (compactLayout) 16.sp else 18.sp
                 )
                 Text(
+                    text = appVersionLabel(),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
                     text = "Update DNS or IP, then retry the server connection.",
                     fontSize = if (compactLayout) 12.sp else 14.sp
                 )
@@ -3390,7 +3408,7 @@ private fun ServerConfigDialog(
                     placeholder = {
                         Text(
                             if (serverConnectionMode == ServerConnectionMode.DNS) {
-                                "HomePC-Sum2"
+                                DEFAULT_SERVER_HOSTNAME
                             } else {
                                 "192.168.2.182"
                             }
@@ -3401,7 +3419,7 @@ private fun ServerConfigDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    text = "Port 3000 is automatic.",
+                    text = "HTTPS port 3443 is automatic. Certificate checks are required.",
                     fontSize = 12.sp
                 )
 

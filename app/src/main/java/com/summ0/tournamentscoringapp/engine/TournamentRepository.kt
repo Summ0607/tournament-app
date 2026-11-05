@@ -10,9 +10,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
-internal const val DEFAULT_SERVER_HOSTNAME = "HomePC-Sum2"
-internal const val DEFAULT_SERVER_PORT = 3000
-internal const val DEFAULT_SERVER_BASE_URL = "http://" + DEFAULT_SERVER_HOSTNAME + ":" + DEFAULT_SERVER_PORT
+internal const val LEGACY_DEFAULT_SERVER_HOSTNAME = "HomePC-Sum2"
+internal const val DEFAULT_SERVER_HOSTNAME = "tourn-svr.home.arpa"
+internal const val DEFAULT_SERVER_PORT = 3443
+internal const val DEFAULT_SERVER_BASE_URL = "https://" + DEFAULT_SERVER_HOSTNAME + ":" + DEFAULT_SERVER_PORT
 internal const val SERVER_CONNECTION_PREFS_NAME = "server_connection_preferences"
 internal const val SERVER_CONNECTION_MODE_KEY = "server_connection_mode"
 internal const val SERVER_CONNECTION_LAST_DNS_NAME_KEY = "server_connection_last_dns_name"
@@ -30,7 +31,11 @@ fun loadServerConnectionConfig(context: Context): ServerConnectionConfig {
     val mode = parseServerConnectionMode(
         preferences.getString(SERVER_CONNECTION_MODE_KEY, ServerConnectionMode.DNS.name).orEmpty()
     )
-    val lastDnsName = preferences.getString(SERVER_CONNECTION_LAST_DNS_NAME_KEY, DEFAULT_SERVER_HOSTNAME).orEmpty().trim()
+    val storedDnsName = preferences.getString(SERVER_CONNECTION_LAST_DNS_NAME_KEY, DEFAULT_SERVER_HOSTNAME).orEmpty().trim()
+    val lastDnsName = migrateLegacyDnsServerName(storedDnsName)
+    if (lastDnsName != storedDnsName && preferences.contains(SERVER_CONNECTION_LAST_DNS_NAME_KEY)) {
+        preferences.edit().putString(SERVER_CONNECTION_LAST_DNS_NAME_KEY, lastDnsName).apply()
+    }
     val lastServerAddress = preferences.getString(SERVER_CONNECTION_LAST_ADDRESS_KEY, null)
         ?: preferences.getString(SERVER_CONNECTION_LAST_IP_KEY, "")
         ?: ""
@@ -84,7 +89,7 @@ suspend fun fetchJsonObject(
             JsonFetchResult(root = JSONObject(body))
         }
     } catch (exception: Exception) {
-        JsonFetchResult(errorMessage = exception.message ?: "Unknown network error")
+        JsonFetchResult(errorMessage = describeNetworkError(exception))
     }
 }
 
@@ -107,9 +112,7 @@ suspend fun fetchRingAssignment(
     val root = jsonResult.root ?: return RingAssignmentFetchResult(errorMessage = jsonResult.errorMessage)
     return try {
         val ringId = root.optString("ringId", "").trim()
-        val serverBaseUrl = root.optString("serverBaseUrl", "").trim().ifEmpty {
-            deriveServerBaseUrl(urlString)
-        }
+        val serverBaseUrl = deriveServerBaseUrl(urlString)
         val currentGroup = root.optJSONObject("currentGroup")?.let(::parseRemoteGroup)
         val ringState = root.parseRingAssignmentState(currentGroup)
         RingAssignmentFetchResult(
@@ -210,7 +213,7 @@ suspend fun fetchActiveEventName(serverBaseUrl: String): ActiveEventFetchResult 
                 "GET $endpoint failed: ${exception.message ?: "Unknown error"}"
             )
             ActiveEventFetchResult(
-                errorMessage = exception.message ?: "Unable to resolve active event name from server."
+                errorMessage = describeNetworkError(exception)
             )
         }
     }
@@ -247,7 +250,7 @@ suspend fun probeHttpOk(urlString: String): HttpProbeResult = withContext(Dispat
             )
         }
     } catch (exception: Exception) {
-        HttpProbeResult(ok = false, errorMessage = exception.message ?: "Unknown network error")
+        HttpProbeResult(ok = false, errorMessage = describeNetworkError(exception))
     }
 }
 
@@ -480,8 +483,27 @@ suspend fun submitDivisionResult(
     } catch (exception: Exception) {
         DivisionResultSubmissionResult.NetworkFailure(
             DivisionResultSubmissionNetworkFailure(
-                message = exception.message ?: "Unknown network error"
+                message = describeNetworkError(exception)
             )
         )
+    }
+}
+
+internal fun describeNetworkError(exception: Exception): String {
+    val causes = generateSequence<Throwable>(exception) { it.cause }.toList()
+    val details = exception.message?.takeIf { it.isNotBlank() } ?: exception.javaClass.simpleName
+    return when {
+        causes.any {
+            it is javax.net.ssl.SSLException ||
+                it is java.security.cert.CertificateException ||
+                it is java.security.cert.CertPathValidatorException
+        } -> "TLS certificate validation failed. Check the tablet date and time, use tourn-svr.home.arpa or 192.168.4.42, and install the app build containing the authorized Tournament Root CA. Do not switch to HTTP or bypass certificate checks. Details: $details"
+        causes.any { it is java.net.UnknownHostException } ->
+            "Cannot resolve the server name. Connect to the tournament Wi-Fi and use tourn-svr.home.arpa, or choose IP mode with 192.168.4.42. Details: $details"
+        causes.any { it is java.net.ConnectException || it is java.net.NoRouteToHostException } ->
+            "Cannot connect to the HTTPS server. Confirm tournament Wi-Fi and that the server is listening on port 3443. Details: $details"
+        causes.any { it is java.net.SocketTimeoutException } ->
+            "The HTTPS server did not respond in time. Confirm tournament Wi-Fi and server availability on port 3443. Details: $details"
+        else -> details
     }
 }

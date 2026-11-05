@@ -25,16 +25,18 @@ fun isValidIpv4Host(host: String): Boolean {
 fun normalizeDnsServerBaseUrl(serverAddressInput: String): String? {
     val trimmedInput = serverAddressInput.trim()
     if (trimmedInput.isEmpty()) return null
-    val host = if (trimmedInput.startsWith("http://", ignoreCase = true) || trimmedInput.startsWith("https://", ignoreCase = true)) {
-        try {
-            URL(trimmedInput).host.trim()
-        } catch (_: Exception) {
-            ""
-        }
-    } else {
-        trimmedInput
+    val inputWithScheme = when {
+        trimmedInput.startsWith("http://", ignoreCase = true) ||
+            trimmedInput.startsWith("https://", ignoreCase = true) -> trimmedInput
+        Regex("^[a-z][a-z0-9+.-]*://", RegexOption.IGNORE_CASE).containsMatchIn(trimmedInput) -> return null
+        else -> "https://$trimmedInput"
     }
-    return if (host.isBlank()) null else "http://$host:${DEFAULT_SERVER_PORT}"
+    val host = try {
+        URL(inputWithScheme).host.trim()
+    } catch (_: Exception) {
+        ""
+    }
+    return if (host.isBlank()) null else "https://$host:${DEFAULT_SERVER_PORT}"
 }
 
 fun normalizeIpServerBaseUrl(serverAddressInput: String): String? {
@@ -46,7 +48,7 @@ fun normalizeIpServerBaseUrl(serverAddressInput: String): String? {
     ) {
         trimmedInput
     } else {
-        "http://$trimmedInput"
+        "https://$trimmedInput"
     }
     return try {
         val parsed = URL(withProtocol)
@@ -54,7 +56,7 @@ fun normalizeIpServerBaseUrl(serverAddressInput: String): String? {
         if (!isValidIpv4Host(host)) {
             null
         } else {
-            "http://$host:${DEFAULT_SERVER_PORT}"
+            "https://$host:${DEFAULT_SERVER_PORT}"
         }
     } catch (_: Exception) {
         null
@@ -64,6 +66,24 @@ fun normalizeIpServerBaseUrl(serverAddressInput: String): String? {
 fun buildServerBaseUrl(mode: ServerConnectionMode, serverAddressInput: String): String? = when (mode) {
     ServerConnectionMode.DNS -> normalizeDnsServerBaseUrl(serverAddressInput) ?: DEFAULT_SERVER_BASE_URL
     ServerConnectionMode.IP -> normalizeIpServerBaseUrl(serverAddressInput)
+}
+
+internal fun migrateLegacyDnsServerName(storedName: String): String =
+    if (storedName.equals(LEGACY_DEFAULT_SERVER_HOSTNAME, ignoreCase = true)) {
+        DEFAULT_SERVER_HOSTNAME
+    } else {
+        storedName
+    }
+
+internal fun migrateLegacyServerBaseUrl(serverBaseUrl: String): String {
+    val parsed = runCatching { URL(serverBaseUrl) }.getOrNull() ?: return serverBaseUrl
+    if (!parsed.protocol.equals("http", ignoreCase = true) || parsed.host.isBlank()) return serverBaseUrl
+    val host = if (parsed.host.equals(LEGACY_DEFAULT_SERVER_HOSTNAME, ignoreCase = true)) {
+        DEFAULT_SERVER_HOSTNAME
+    } else {
+        parsed.host
+    }
+    return "https://$host:$DEFAULT_SERVER_PORT"
 }
 
 fun serverAddressInputFromServerBaseUrl(serverBaseUrl: String): String? {

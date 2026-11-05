@@ -20,7 +20,9 @@ import com.summ0.tournamentscoringapp.engine.fetchRemoteGroup
 import com.summ0.tournamentscoringapp.engine.fetchRingAssignment
 import com.summ0.tournamentscoringapp.engine.fetchRingConfig
 import com.summ0.tournamentscoringapp.engine.fetchServerVersionCode
+import com.summ0.tournamentscoringapp.engine.describeNetworkError
 import com.summ0.tournamentscoringapp.engine.loadServerConnectionConfig
+import com.summ0.tournamentscoringapp.engine.migrateLegacyServerBaseUrl
 import com.summ0.tournamentscoringapp.engine.parseServerConnectionMode
 import com.summ0.tournamentscoringapp.engine.persistServerConnectionConfig
 import com.summ0.tournamentscoringapp.engine.probeHttpOk
@@ -131,7 +133,7 @@ class MainViewModel(
 
     class DivisionResultUploader(
         private val packetStore: DivisionResultPacketStore,
-        private val serverBaseUrl: String // e.g., "http://192.168.4.10:3000/api"
+        private val serverBaseUrl: String // e.g., "https://192.168.4.42:3443"
     ) {
         companion object {
             private const val TAG = "DivisionResultUploader"
@@ -182,7 +184,7 @@ class MainViewModel(
                         }
                     } catch (e: Exception) {
                         // Network dropped or timeout occurred; preserve locally and stop batch
-                        Log.e(TAG, "Network error uploading packet ${packet.nameWithoutExtension}. Retaining locally.", e)
+                        Log.e(TAG, "Network error uploading packet ${packet.nameWithoutExtension}. Retaining locally: ${describeNetworkError(e)}", e)
                         break
                     } finally {
                         connection?.disconnect()
@@ -206,7 +208,7 @@ class MainViewModel(
             val packetText = pendingFile.readText()
             val packetJson = store.loadPacket(pendingFile)
             results += submitPacket(
-                serverBaseUrl = metadata.serverBaseUrl,
+                serverBaseUrl = migrateLegacyServerBaseUrl(metadata.serverBaseUrl),
                 ringId = metadata.ringId,
                 packetJson = packetJson,
                 packetText = packetText,
