@@ -331,11 +331,13 @@ internal fun CheckInScreen(
             buildServerBaseUrl(
                 mode = initialServerConnectionConfig.mode,
                 serverAddressInput = serverAddressForCurrentMode
-            ) ?: DEFAULT_SERVER_BASE_URL
+            ).let { TabletAuthorization.server() ?: it ?: DEFAULT_SERVER_BASE_URL }
         )
     }
     var launchRingOptions by remember { mutableStateOf(emptyList<RingOption>()) }
-    var selectedLaunchRingId by rememberSaveable { mutableStateOf("") }
+    var selectedLaunchRingId by rememberSaveable { mutableStateOf(TabletAuthorization.ringId().orEmpty()) }
+    var showRingPairing by remember { mutableStateOf(false) }
+    var authorizationPromptDismissed by remember { mutableStateOf(false) }
     var isCheckingLaunchServer by remember { mutableStateOf(false) }
     var isRefreshingLaunchServer by remember { mutableStateOf(false) }
     var launchServerReachable by remember { mutableStateOf(false) }
@@ -553,21 +555,6 @@ internal fun CheckInScreen(
         remoteStatus = "Pending Assignment"
     }
 
-    fun invalidateStaleRingSelection(message: String) {
-        resetCompetitionState()
-        resetDivisionState()
-        competitorsState.value = emptyList()
-        currentGroupBannerState.value = GroupBanner()
-        resetControlBoardPhaseHistory("setup")
-        currentRingId = ""
-        currentRingLabel = ""
-        currentRingAssignment = null
-        selectedLaunchRingId = ""
-        ringConnectionNeedsReconnect = false
-        remoteStatus = message
-        launchServerStatus = message
-    }
-
     fun moveToScreen(nextScreen: CompetitionScreen, resetControlBoardPhase: Boolean = false) {
         currentScreenState.value = nextScreen
         if (nextScreen == CompetitionScreen.CHECK_IN) {
@@ -592,104 +579,30 @@ internal fun CheckInScreen(
         remoteStatus = message
     }
 
-    fun syncSelectedLaunchRing() {
-        val ringIds = launchRingOptions.map { it.ringId }
-        if (currentRingId.isNotBlank() && currentRingId in ringIds) {
-            selectedLaunchRingId = currentRingId
-        } else if (selectedLaunchRingId !in ringIds) {
-            selectedLaunchRingId = ""
-        }
-    }
-
     fun refreshLaunchRingOptions() {
         if (isRefreshingLaunchServer) return
+        val pairedServer = TabletAuthorization.server()
+        if (pairedServer == null) {
+            launchServerStatus = "Scan today's ring QR code to authorize and connect."
+            launchServerReachable = false
+            return
+        }
         screenScope.launch {
             isRefreshingLaunchServer = true
             try {
-                val preferredMode = parseServerConnectionMode(serverConnectionModeName)
-                val alternateMode = if (preferredMode == ServerConnectionMode.DNS) ServerConnectionMode.IP else ServerConnectionMode.DNS
-                val candidateModes = listOf(preferredMode, alternateMode).distinct()
-                val candidateResults = mutableListOf<String>()
-
                 isCheckingLaunchServer = true
-                launchServerReachable = false
                 launchServerStatus = "Checking server..."
-
-                for (mode in candidateModes) {
-                    val serverAddress = if (mode == ServerConnectionMode.DNS) lastDnsName else lastServerAddress
-                    val candidateBaseUrl = buildServerBaseUrl(mode, serverAddress)
-                    if (candidateBaseUrl == null) {
-                        candidateResults += if (mode == ServerConnectionMode.DNS) {
-                            "DNS server name is invalid."
-                        } else {
-                            "IPv4 address is invalid."
-                        }
-                        continue
-                    }
-
-                    launchServerStatus = "Checking ${if (mode == ServerConnectionMode.DNS) "DNS" else "IP"} server..."
-                    val healthResult = probeHttpOk("${candidateBaseUrl.trimEnd('/')}/api/health")
-                    if (!healthResult.ok) {
-                        candidateResults += healthResult.errorMessage ?: "Unable to reach server."
-                        continue
-                    }
-
-                    val result = fetchRingConfig(
-                        "${candidateBaseUrl.trimEnd('/')}/api/rings/config",
-                        tabletLabel = tabletLabel
-                    )
-                    if (result.errorMessage == null) {
-                        val newRingIds = result.rings.map { it.ringId }.toSet()
-                        val currentRingOption = result.rings.firstOrNull { it.ringId == currentRingId }
-                        val selectedRingOption = result.rings.firstOrNull { it.ringId == selectedLaunchRingId }
-                        serverConnectionModeName = mode.name
-                        if (mode == ServerConnectionMode.DNS) {
-                            lastDnsName = serverAddress.ifBlank { DEFAULT_SERVER_HOSTNAME }
-                        } else {
-                            lastServerAddress = serverAddress.trim()
-                        }
-                        mainViewModel.saveServerConnectionConfig(
-                            ServerConnectionConfig(
-                                mode = mode,
-                                lastDnsName = lastDnsName,
-                                lastServerAddress = lastServerAddress
-                            )
-                        )
-                        serverBaseUrl = result.serverBaseUrl ?: candidateBaseUrl
-                        launchRingOptions = result.rings
-                        launchServerReachable = true
-                        launchServerStatus = when {
-                            launchRingOptions.isEmpty() -> "Server reachable, but no rings are configured."
-                            launchRingOptions.any { it.isAvailable } -> "Server reachable. Select a ring."
-                            else -> "All rings are in use."
-                        }
-                        if (currentRingId.isNotBlank() && (currentRingOption == null || !currentRingOption.isAvailable)) {
-                            invalidateStaleRingSelection("Ring $currentRingLabel is no longer available. Please choose again.")
-                        } else {
-                            if (selectedLaunchRingId.isNotBlank() && (selectedRingOption == null || !selectedRingOption.isAvailable)) {
-                                selectedLaunchRingId = ""
-                            }
-                            syncSelectedLaunchRing()
-                        }
-                        return@launch
-                    }
-
-                    candidateResults += result.errorMessage ?: "Unable to reach server."
+                val result = fetchRingConfig("$pairedServer/api/rings/config", tabletLabel = tabletLabel)
+                if (result.errorMessage != null) {
+                    launchServerReachable = false
+                    launchServerStatus = "Unable to connect. ${result.errorMessage} Scan today's ring QR code if authorization expired."
+                    return@launch
                 }
-
-                launchRingOptions = emptyList()
-                selectedLaunchRingId = ""
-                currentRingId = ""
-                currentRingLabel = ""
-                currentGroupBannerState.value = GroupBanner()
-                launchServerReachable = false
-                launchServerStatus = buildString {
-                    append("Unable to reach server.")
-                    if (candidateResults.isNotEmpty()) {
-                        append(' ')
-                        append(candidateResults.joinToString(" "))
-                    }
-                }.trim()
+                serverBaseUrl = pairedServer
+                launchRingOptions = result.rings.filter { it.ringId == TabletAuthorization.ringId() }
+                selectedLaunchRingId = TabletAuthorization.ringId().orEmpty()
+                launchServerReachable = true
+                launchServerStatus = "Ring authorized. Connect to continue."
             } finally {
                 isCheckingLaunchServer = false
                 isRefreshingLaunchServer = false
@@ -704,6 +617,7 @@ internal fun CheckInScreen(
             markRingConnectionNeedsReconnect(
                 result.errorMessage ?: "Connection lost. Reconnect Ring to restore contact."
             )
+            if (result.httpStatus == 401 && !authorizationPromptDismissed) showRingPairing = true
         }
     }
 
@@ -822,11 +736,19 @@ internal fun CheckInScreen(
     }
 
     fun reconnectCurrentRing() {
-        if (currentRingId.isNotBlank()) {
-            selectedLaunchRingId = currentRingId
-            connectSelectedRing()
-        } else {
-            refreshLaunchRingOptions()
+        screenScope.launch {
+            val result = fetchJsonObject("${serverBaseUrl.trimEnd('/')}/api/tablet/session")
+            if (result.root == null) {
+                if (result.httpStatus == 401 || result.httpStatus == 403 || TabletAuthorization.server() == null) {
+                    showRingPairing = true
+                } else {
+                    remoteStatus = result.errorMessage ?: "Unable to reach server. Check Wi-Fi and retry."
+                }
+            } else {
+                launchServerReachable = true
+                selectedLaunchRingId = result.root.getString("ringId")
+                connectSelectedRing()
+            }
         }
     }
 
@@ -913,11 +835,13 @@ internal fun CheckInScreen(
                 }
                 is DivisionResultSubmissionResult.Rejected -> {
                     remoteStatus = "Result submission rejected: ${submissionResult.response.errors.joinToString("; ")}"
+                    if (submissionResult.response.statusCode == 401) showRingPairing = true
                 }
                 is DivisionResultSubmissionResult.NetworkFailure -> {
                     markRingConnectionNeedsReconnect(
                         submissionResult.failure.message
                     )
+                    if (submissionResult.failure.statusCode == 401) showRingPairing = true
                 }
             }
             isCompletingGroup = false
@@ -967,8 +891,25 @@ internal fun CheckInScreen(
         }
     }
 
+    if (showRingPairing) {
+        RingPairingDialog(
+            expectedRingId = currentRingId.takeIf { currentGroupBanner.isLoaded },
+            expectedEvent = currentRingAssignment?.eventName?.takeIf { currentGroupBanner.isLoaded },
+            onDismiss = { showRingPairing = false; authorizationPromptDismissed = true },
+            onAuthorized = { server, ring ->
+                showRingPairing = false
+                authorizationPromptDismissed = false
+                serverBaseUrl = server
+                selectedLaunchRingId = ring
+                launchServerReachable = true
+                connectSelectedRing()
+            }
+        )
+    }
+
     LaunchedEffect(Unit) {
-        refreshLaunchRingOptions()
+        if (TabletAuthorization.server() != null) reconnectCurrentRing()
+        else refreshLaunchRingOptions()
     }
 
     LaunchedEffect(showServerConfigDialog, launchServerReachable) {
@@ -1531,6 +1472,7 @@ internal fun CheckInScreen(
                                 val apkFile = File(dir, "update.apk")
                                 withContext(Dispatchers.IO) {
                                     val conn = URL(apkUrl).openConnection() as HttpURLConnection
+                                    TabletAuthorization.applyTo(conn)
                                     conn.connectTimeout = 10_000
                                     conn.readTimeout = 30_000
                                     try {
@@ -1603,6 +1545,7 @@ internal fun CheckInScreen(
             isCompactScreen = isCompactScreen,
             onSelectRing = { selectedLaunchRingId = it },
             onConnectSelectedRing = { connectSelectedRing() },
+            onScanRing = { showRingPairing = true },
             onEditServer = { showServerConfigDialog = true },
             onExit = { requestExitApp() }
         )
@@ -2073,6 +2016,7 @@ private fun LaunchScreenPanel(
     isCompactScreen: Boolean,
     onSelectRing: (String) -> Unit,
     onConnectSelectedRing: () -> Unit,
+    onScanRing: () -> Unit,
     onEditServer: () -> Unit,
     onExit: () -> Unit
 ) {
@@ -2133,6 +2077,9 @@ private fun LaunchScreenPanel(
                 modifier = Modifier.padding(cardPadding),
                 verticalArrangement = Arrangement.spacedBy(if (isCompactScreen) 10.dp else 12.dp)
             ) {
+                Button(onClick = onScanRing, modifier = Modifier.fillMaxWidth()) {
+                    Text("Scan daily ring QR code")
+                }
                 Text(
                     text = when {
                         isAssigned -> "Connected"

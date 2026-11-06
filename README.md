@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.45 (46)**. The installed version is shown beneath
+This checkpoint is version **1.46 (47)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.45 (46)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.46 (47)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -59,23 +59,38 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
 
    The bundled root certificate is app-scoped; no Android system certificate
    installation or user CA approval is required.
-4. Connect the tablet to the tournament Wi-Fi and open the app's Server
-   Configuration. Try the default DNS name `tourn-svr.home.arpa` and tap
-   **Save & Retry**. Confirm that the server is reachable, rings are listed,
-   and a ring can be connected. If local DNS is unavailable, choose **IP** and
-   enter `192.168.4.42`; reconnect and verify ring operations.
+4. Connect the tablet to tournament Wi-Fi. On the laptop, activate a **test
+   tournament**, open **Ring Assignment**, select a ring, and open **Daily tablet
+   QR code**. On the tablet, tap **Scan daily ring QR code**, allow camera access,
+   and scan the laptop screen. The app authorizes and automatically connects to
+   the encoded ring; no account password or manual ring choice is needed.
 5. Exercise the normal app flows: load a ring/group, send a heartbeat, submit
    test results, and confirm the server receives them. For the update path,
    make the server's offered APK/version newer than the installed app, wait for
    **Update Available**, download it, and verify Android's installer reports
    the expected app/version. APK downloads use the configured HTTPS host too.
-6. Confirm failures are fail-closed: disconnect Wi-Fi or enter a nonmatching
-   server name and verify an actionable DNS/network/TLS error appears. Restore
-   the correct DNS/IP and verify the app reconnects. Never resolve a
+6. Reopen the app and briefly disconnect/reconnect Wi-Fi; authorization should
+   survive. The same daily code can be rescanned. A second tablet sees a warning
+   before replacing the first tablet's authorization. Verify an expired code is
+   rejected: both the code and authorization expire at midnight according to the
+   laptop clock. Do not change the live laptop clock for testing. Never resolve a
    certificate error by switching to HTTP, installing an unknown CA globally,
    or disabling hostname/certificate checks.
 
-**Scope limitation:** this implements validated HTTPS transport for the
-authorized server certificate and the app workflows described above. Server
-device enrollment/authentication is not implemented by the server, so this is
-not a completed device-authentication or full security-rollout feature.
+### Daily ring credentials
+
+The app exchanges the reusable daily QR token over HTTPS for a credential scoped
+to that tournament, ring and laptop-local day. Credentials survive app/server
+restarts, are excluded from Android backup and device transfer, and are attached
+only to the paired HTTPS origin (never redirected to another host). The server
+rejects other ring operations, revoked tablets and expired credentials. Rescanning
+the current ring code restores authorization without clearing unsent scores.
+While a division is loaded, scanning another ring or tournament is rejected.
+
+The QR address is authoritative for the paired connection. The app retains DNS/IP
+configuration, but changing those settings does not move an existing credential
+to another server. Scan that server's code to authorize a different connection.
+Fixed-IP QR scanning and authorization have been verified on the physical tablet.
+QR codes default to the fixed IP while tablet DNS resolution is unavailable.
+Replacement and score-submission acceptance checks remain part of tablet testing.
+The server now uses HTTPS-only listeners; no HTTP fallback is available.

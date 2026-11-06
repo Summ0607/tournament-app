@@ -323,7 +323,8 @@ data class RingGridCell(
 
 data class JsonFetchResult(
     val root: org.json.JSONObject? = null,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val httpStatus: Int? = null
 )
 
 data class HttpProbeResult(

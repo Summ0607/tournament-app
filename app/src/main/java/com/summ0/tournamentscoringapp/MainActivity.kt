@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import com.summ0.tournamentscoringapp.engine.CompetitionScreen
+import com.summ0.tournamentscoringapp.engine.TabletAuthorization
 import com.summ0.tournamentscoringapp.ui.theme.TournamentScoringAppTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TabletAuthorization.initialize(applicationContext)
         val launchScreen = intent?.getStringExtra(EXTRA_LAUNCH_SCREEN)
         val initialScreen = launchScreen?.let(::launchInitialScreen) ?: CompetitionScreen.CHECK_IN
 

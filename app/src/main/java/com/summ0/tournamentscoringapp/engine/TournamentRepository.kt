@@ -59,11 +59,14 @@ fun persistServerConnectionConfig(context: Context, config: ServerConnectionConf
 suspend fun fetchJsonObject(
     urlString: String,
     method: String = "GET",
-    jsonBody: JSONObject? = null
+    jsonBody: JSONObject? = null,
+    authorize: Boolean = true
 ): JsonFetchResult = withContext(Dispatchers.IO) {
     try {
         val url = URL(urlString)
         val connection = url.openConnection() as HttpURLConnection
+        connection.instanceFollowRedirects = false
+        if (authorize) TabletAuthorization.applyTo(connection)
         connection.requestMethod = method
         connection.connectTimeout = 10_000
         connection.readTimeout = 10_000
@@ -79,14 +82,14 @@ suspend fun fetchJsonObject(
         val responseCode = connection.responseCode
         if (responseCode != HttpURLConnection.HTTP_OK) {
             val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            JsonFetchResult(errorMessage = if (errorBody.isNotBlank()) {
+            JsonFetchResult(httpStatus = responseCode, errorMessage = if (errorBody.isNotBlank()) {
                 "Server returned HTTP $responseCode: $errorBody"
             } else {
                 "Server returned HTTP $responseCode"
             })
         } else {
             val body = connection.inputStream.bufferedReader().use { it.readText() }
-            JsonFetchResult(root = JSONObject(body))
+            JsonFetchResult(root = JSONObject(body), httpStatus = responseCode)
         }
     } catch (exception: Exception) {
         JsonFetchResult(errorMessage = describeNetworkError(exception))
@@ -163,6 +166,7 @@ suspend fun fetchActiveEventName(serverBaseUrl: String): ActiveEventFetchResult 
         try {
             val url = URL(urlString)
             val connection = url.openConnection() as HttpURLConnection
+            TabletAuthorization.applyTo(connection)
             connection.requestMethod = "GET"
             connection.connectTimeout = 10_000
             connection.readTimeout = 10_000
@@ -231,6 +235,7 @@ suspend fun probeHttpOk(urlString: String): HttpProbeResult = withContext(Dispat
     try {
         val url = URL(urlString)
         val connection = url.openConnection() as HttpURLConnection
+        TabletAuthorization.applyTo(connection)
         connection.requestMethod = "GET"
         connection.connectTimeout = 10_000
         connection.readTimeout = 10_000
@@ -387,6 +392,7 @@ suspend fun submitDivisionResult(
     try {
         val url = URL(urlString)
         val connection = url.openConnection() as HttpURLConnection
+        TabletAuthorization.applyTo(connection)
         connection.requestMethod = "POST"
         connection.connectTimeout = 10_000
         connection.readTimeout = 10_000
