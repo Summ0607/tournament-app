@@ -6,6 +6,7 @@ import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.time.Instant
 
 /** Lifecycle of a division stored durably on the tablet. */
@@ -124,6 +125,7 @@ class DivisionStore(baseDir: File) {
     private val rootDir = File(baseDir, "divisions")
     private val indexFile = File(rootDir, "index.json")
     private val servicePacketsDir = File(rootDir, "service-packets")
+    private val judgePlansDir = File(baseDir, "judge-plans")
 
     fun saveDivision(group: RemoteGroup, source: String): DivisionRecord {
         val anchor = divisionAnchor(group)
@@ -205,6 +207,57 @@ class DivisionStore(baseDir: File) {
         } catch (_: Exception) {
             null
         }
+    }
+
+    fun saveJudgePlan(eventName: String, ringId: String, phase: String, plan: JSONObject): Boolean {
+        require(eventName.isNotBlank() && ringId.isNotBlank()) { "Event and ring are required to save a judge plan." }
+        require(phase == "P1" || phase == "P2") { "Judge plan phase must be P1 or P2." }
+        require(plan.optString("type") == "tournament-judge-plan" &&
+            plan.optInt("schemaVersion", 0) == 1 &&
+            plan.optString("eventName") == eventName &&
+            plan.optString("ringId") == ringId &&
+            plan.optString("phase") == phase &&
+            plan.optString("assignmentRevision").isNotBlank() &&
+            plan.optString("sourceRevision").isNotBlank()) {
+            "The server returned an invalid judge plan."
+        }
+        val verifier = plan.optJSONObject("replacementPinVerifier")
+        require(plan.optBoolean("replacementPinConfigured") == (verifier != null)) {
+            "The server returned inconsistent replacement PIN configuration."
+        }
+        if (verifier != null) {
+            require(verifier.optString("algorithm") == "SHA-256-salted-v1" &&
+                verifier.optString("salt").matches(Regex("[a-fA-F0-9]{32}")) &&
+                verifier.optString("digest").matches(Regex("[a-fA-F0-9]{64}"))) {
+                "The server returned an invalid replacement PIN verifier."
+            }
+        }
+        judgePlansDir.mkdirs()
+        writeAtomic(judgePlanFile(eventName, ringId, phase), plan.toString(2))
+        return true
+    }
+
+    fun loadJudgePlan(eventName: String, ringId: String, phase: String): JSONObject? {
+        val file = judgePlanFile(eventName, ringId, phase)
+        if (!file.isFile) return null
+        return try {
+            JSONObject(file.readText()).takeIf {
+                it.optString("type") == "tournament-judge-plan" &&
+                    it.optInt("schemaVersion", 0) == 1 &&
+                    it.optString("eventName") == eventName &&
+                    it.optString("ringId") == ringId &&
+                    it.optString("phase") == phase &&
+                    it.optString("assignmentRevision").isNotBlank() &&
+                    it.optString("sourceRevision").isNotBlank()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun deleteJudgePlan(eventName: String, ringId: String, phase: String): Boolean {
+        val file = judgePlanFile(eventName, ringId, phase)
+        return !file.exists() || file.delete()
     }
 
     fun prepareServicePacket(ringId: String, phase: String, eventName: String): StoredServicePacket {
@@ -306,6 +359,17 @@ class DivisionStore(baseDir: File) {
     }
 
     private fun servicePacketFile(submissionId: String) = File(servicePacketsDir, "$submissionId.json")
+
+    private fun judgePlanFile(eventName: String, ringId: String, phase: String): File {
+        require(eventName.isNotBlank() && ringId.isNotBlank() && (phase == "P1" || phase == "P2")) {
+            "Event, ring and a valid phase are required to access a judge plan."
+        }
+        val key = "$eventName\u0000$ringId\u0000$phase"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(key.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return File(judgePlansDir, "$digest.json")
+    }
 
     fun hasSession(anchor: String): Boolean = sessionFile(anchor).isFile
 

@@ -134,6 +134,38 @@ import kotlin.random.Random
 import kotlinx.coroutines.delay
 
 internal const val EXTRA_LAUNCH_SCREEN = "com.summ0.tournamentscoringapp.extra.LAUNCH_SCREEN"
+
+private fun formatJudgePlanSummary(plan: JSONObject, source: String): String {
+    val positions = plan.optJSONObject("positions") ?: JSONObject()
+    val roster = listOf("center", "corner", "sktk").joinToString(" · ") { role ->
+        val names = positions.optJSONArray(role)?.let { officials ->
+            (0 until officials.length()).mapNotNull { index ->
+                officials.optJSONObject(index)?.let { official ->
+                    "${official.optString("name")} (${official.optString("associationId")})"
+                }
+            }
+        }.orEmpty()
+        "${role.uppercase()}: ${names.joinToString()}"
+    }
+    val arbitrators = plan.optJSONArray("arbitrators")?.let { officials ->
+        (0 until officials.length()).mapNotNull { index ->
+            officials.optJSONObject(index)?.let {
+                "${it.optString("name")} (${it.optString("associationId")})"
+            }
+        }
+    }.orEmpty()
+    val replacementPin = if (plan.optBoolean("replacementPinConfigured")) {
+        "Replacement PIN verification is available (PIN hidden)."
+    } else {
+        "No replacement PIN verification data is configured."
+    }
+    return "$source; assignment revision ${plan.optString("assignmentRevision")}. $roster" +
+        if (arbitrators.isEmpty()) {
+            " · $replacementPin"
+        } else {
+            " · ARBITRATORS: ${arbitrators.joinToString()} · $replacementPin"
+        }
+}
 internal const val LAUNCH_SCREEN_HYUNGS = "hyungs"
 internal const val LAUNCH_SCREEN_WEAPONS = "weapons"
 
@@ -836,34 +868,65 @@ internal fun CheckInScreen(
             judgePlanSummary = "Authorize a ring before loading its saved plan."
             return
         }
+        val pairedEvent = TabletAuthorization.event()?.takeIf { it.isNotBlank() }
         screenScope.launch {
-            judgePlanSummary = "Loading saved assignment plan..."
+            val cached = pairedEvent?.let {
+                withContext(Dispatchers.IO) { divisionStore.loadJudgePlan(it, ringId, phase) }
+            }
+            if (cached != null) {
+                judgePlanSummary = formatJudgePlanSummary(cached, "Saved on this tablet")
+            } else {
+                judgePlanSummary = "Loading saved assignment plan..."
+            }
             val server = TabletAuthorization.server() ?: serverBaseUrl
             val result = fetchRingJudgePlan(server, ringId, phase)
             val root = result.root
             if (root == null) {
-                judgePlanSummary = result.errorMessage ?: "Unable to load the saved assignment plan."
+                judgePlanSummary = if (cached != null) {
+                    "${formatJudgePlanSummary(cached, "Offline copy")} Server unavailable; this saved roster may be out of date."
+                } else {
+                    result.errorMessage ?: "Unable to load the saved assignment plan."
+                }
                 return@launch
             }
             if (root.optString("type") != "tournament-judge-plan" || root.optString("ringId") != ringId ||
-                root.optString("phase") != phase) {
-                judgePlanSummary = "The server returned a mismatched judge assignment plan."
+                root.optInt("schemaVersion", 0) != 1 || root.optString("eventName").isBlank() ||
+                root.optString("phase") != phase ||
+                (pairedEvent != null && root.optString("eventName") != pairedEvent)) {
+                judgePlanSummary = if (cached != null) {
+                    "${formatJudgePlanSummary(cached, "Offline copy")} The server returned a mismatched plan."
+                } else {
+                    "The server returned a mismatched judge assignment plan."
+                }
                 return@launch
             }
             if (!root.optBoolean("assigned")) {
-                judgePlanSummary = "No saved assignment exists for $ringId, $phase."
+                val removed = withContext(Dispatchers.IO) {
+                    divisionStore.deleteJudgePlan(root.optString("eventName"), ringId, phase)
+                }
+                judgePlanSummary = if (removed) {
+                    "No saved assignment exists for $ringId, $phase."
+                } else {
+                    "The server has no saved assignment, but the outdated offline copy could not be removed."
+                }
                 return@launch
             }
-            val positions = root.optJSONObject("positions") ?: JSONObject()
-            judgePlanSummary = listOf("center", "corner", "sktk").joinToString(" · ") { role ->
-                val names = positions.optJSONArray(role)?.let { officials ->
-                    (0 until officials.length()).mapNotNull { index ->
-                        officials.optJSONObject(index)?.let { official ->
-                            "${official.optString("name")} (${official.optString("associationId")})"
-                        }
-                    }
-                }.orEmpty()
-                "${role.uppercase()}: ${names.joinToString()}"
+            if (root.optString("assignmentRevision").isBlank() || root.optString("sourceRevision").isBlank()) {
+                judgePlanSummary = "The server returned an assignment plan without revision information."
+                return@launch
+            }
+            val verifier = root.optJSONObject("replacementPinVerifier")
+            if (root.optBoolean("replacementPinConfigured") && verifier == null) {
+                judgePlanSummary = "The server marked a replacement PIN configured but did not provide verification data."
+                return@launch
+            }
+            try {
+                withContext(Dispatchers.IO) {
+                    divisionStore.saveJudgePlan(root.optString("eventName"), ringId, phase, root)
+                }
+                judgePlanSummary = formatJudgePlanSummary(root, "Downloaded and saved on this tablet")
+            } catch (error: Exception) {
+                judgePlanSummary = error.message ?: "Unable to save the assignment plan on this tablet."
             }
         }
     }
@@ -2835,7 +2898,7 @@ private fun JudgeServiceDialog(
                         ) { Text(phase) }
                     }
                     OutlinedButton(onClick = { onLoadPlan(working.phase) }, enabled = !isTransferring) {
-                        Text("Check saved plan")
+                        Text("Load / refresh saved plan")
                     }
                 }
                 if (planSummary.isNotBlank()) Text(planSummary, fontSize = 12.sp)

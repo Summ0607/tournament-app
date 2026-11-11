@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.49 (50)**. The installed version is shown beneath
+This checkpoint is version **1.50 (51)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.49 (50)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.50 (51)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -150,8 +150,12 @@ phase. The screen supports seating, replacing a seated judge, swapping a
 judge's role, and removing a judge, keeping a timestamped history of every
 `SEATED`/`REPLACED`/`SWAPPED` change alongside the final lineup. Center, corner,
 scorekeeper, timekeeper and arbitrator are distinct actual roles. Division
-histories are stored separately per phase and survive restarts. **Check saved
-plan** reads the ring/phase assignment slice without changing it.
+histories are stored separately per phase and survive restarts. **Load / refresh
+saved plan** downloads the ring/phase roster, assignment/source revisions, arbitrator
+reserves, and hidden event-PIN verification data without changing the server
+plan. The app persists the complete plan by event/ring/phase. It can show the
+saved roster after restart or when the server is unreachable, clearly marking
+that offline copy as potentially stale. The PIN itself is never displayed.
 
 **Transfer ring-phase service** consolidates all locally stored division
 histories for that ring and phase into one packet with its own submission ID.

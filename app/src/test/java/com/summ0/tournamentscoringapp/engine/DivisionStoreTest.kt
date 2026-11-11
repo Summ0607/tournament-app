@@ -81,6 +81,35 @@ class DivisionStoreTest {
     }
 
     @Test
+    fun ringJudgePlansAndHiddenPinVerifierSurviveRestartAndRemainScoped() {
+        val plan = JSONObject()
+            .put("type", "tournament-judge-plan")
+            .put("schemaVersion", 1)
+            .put("eventName", "Event A")
+            .put("ringId", "ring-a-1")
+            .put("phase", "P1")
+            .put("assignmentRevision", "revision-1")
+            .put("sourceRevision", "source-1")
+            .put("replacementPinConfigured", true)
+            .put("replacementPinVerifier", JSONObject()
+                .put("algorithm", "SHA-256-salted-v1")
+                .put("salt", "a".repeat(32))
+                .put("digest", "b".repeat(64)))
+            .put("assigned", true)
+            .put("positions", org.json.JSONObject()
+                .put("center", org.json.JSONArray()
+                    .put(JSONObject().put("associationId", "ID1").put("name", "Center Judge"))))
+
+        assertTrue(DivisionStore(folder.root).saveJudgePlan("Event A", "ring-a-1", "P1", plan))
+        val reopened = DivisionStore(folder.root)
+        assertEquals(plan.toString(), reopened.loadJudgePlan("Event A", "ring-a-1", "P1")?.toString())
+        assertNull(reopened.loadJudgePlan("Event A", "ring-a-1", "P2"))
+        assertNull(reopened.loadJudgePlan("Event B", "ring-a-1", "P1"))
+        assertTrue(reopened.deleteJudgePlan("Event A", "ring-a-1", "P1"))
+        assertNull(reopened.loadJudgePlan("Event A", "ring-a-1", "P1"))
+    }
+
+    @Test
     fun statusLifecycleTracksCompletionAndSubmission() {
         val store = DivisionStore(folder.root)
         store.saveDivision(sampleGroup(20), "network")
