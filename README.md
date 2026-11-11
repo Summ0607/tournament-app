@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.48 (49)**. The installed version is shown beneath
+This checkpoint is version **1.49 (50)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.48 (49)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.49 (50)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -119,7 +119,7 @@ assigns a different one. An in-flight sparring bout timer is not persisted:
 reopen the bout after a restart; recorded points and warnings are retained.
 Completing a division marks it `COMPLETED`, and a server acknowledgment marks it
 `SUBMITTED` with the accepted submission id. Stored divisions are retained for
-later stages (multi-division QR loading and USB transfer).
+later use and survive app restarts.
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionStoreTest`,
 `DivisionSessionTest`).
@@ -145,13 +145,28 @@ saved session.
 ### Judge service recording
 
 **Judge Service** on the check-in header records who is actually serving the
-loaded division: center, corner, SK/TK and arbitrator seats, each judge
-identified by Association ID. The screen supports seating, replacing a seated
-judge, swapping a judge's role, and removing a judge, keeping a timestamped
-history of every `seated`/`replaced`/`swapped` change alongside the final
-lineup. The record is stored per division at `{division}/service.json` and is
-recovered with the division after a restart. Transfer to the server as a
-separate per-ring-phase service packet follows in a later stage.
+loaded division. Choose P1/P2 assignment phase; it is independent of the scoring
+phase. The screen supports seating, replacing a seated judge, swapping a
+judge's role, and removing a judge, keeping a timestamped history of every
+`SEATED`/`REPLACED`/`SWAPPED` change alongside the final lineup. Center, corner,
+scorekeeper, timekeeper and arbitrator are distinct actual roles. Division
+histories are stored separately per phase and survive restarts. **Check saved
+plan** reads the ring/phase assignment slice without changing it.
+
+**Transfer ring-phase service** consolidates all locally stored division
+histories for that ring and phase into one packet with its own submission ID.
+The packet is saved before network transfer; failed or interrupted transfers
+retry with the same ID, and the app records the server receipt durably. A second
+packet for an already acknowledged ring-phase is prevented. The Judge Management
+coordinator can review and import received packets as unverified Tournament
+experience; coordinator verification remains a separate action. Legacy combined
+SK/TK entries require the coordinator to identify Scorekeeper or Timekeeper.
+
+When network transfer is unavailable, **Save packet to USB** writes the same
+durable packet through Android's document picker. A coordinator imports it from
+USB in the server's active-tournament Judge Management workspace and returns the
+downloaded receipt file to the tablet. **Import USB receipt** validates that the
+receipt matches a saved submission and records the acknowledgment durably.
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionPackageTest`,
-`RingPhaseServiceTest`).
+`DivisionStoreTest`, `RingPhaseServiceTest`).

@@ -76,11 +76,34 @@ class RingPhaseServiceTest {
         val service = base()
             .seat(ServiceRole.CENTER, center, at = "t0")
             .seat(ServiceRole.CORNER, corner1, at = "t1")
-            .seat(ServiceRole.SKTK, corner2, at = "t2")
+            .seat(ServiceRole.SCOREKEEPER, corner2, at = "t2")
             .replace(ServiceRole.CORNER, "TSD-201", reliefCorner, at = "t3")
-            .swapRole("TSD-203", ServiceRole.SKTK, at = "t4")
+            .swapRole("TSD-203", ServiceRole.TIMEKEEPER, at = "t4")
         val parsed = parseRingPhaseService(serializeRingPhaseService(service))
         assertEquals(service, parsed)
+    }
+
+    @Test
+    fun ringPhasePacketCombinesDivisionHistoriesWithoutChangingTheirAnchors() {
+        val first = base().copy(groupAnchor = "20")
+            .seat(ServiceRole.CENTER, center, at = "t0")
+            .replace(ServiceRole.CENTER, center.associationId, reliefCorner, at = "t1")
+        val second = base().copy(groupAnchor = "21")
+            .seat(ServiceRole.TIMEKEEPER, corner1, at = "t2")
+        val packet = buildRingPhaseServicePacket(
+            ringId = "ring-a-1",
+            phase = "P1",
+            services = listOf(first, second, base().copy(ringId = "ring-b-1")),
+            submissionId = "123e4567-e89b-12d3-a456-426614174000"
+        )
+        assertEquals("tournament-judge-service", packet.getString("type"))
+        assertEquals("P1", packet.getString("phase"))
+        assertEquals(listOf("20", "21"), (0 until packet.getJSONArray("divisions").length())
+            .map { packet.getJSONArray("divisions").getJSONObject(it).getString("groupAnchor") })
+        assertEquals(2, packet.getJSONArray("divisions").getJSONObject(0).getJSONArray("history").length())
+        assertEquals(corner1.associationId, packet.getJSONArray("divisions").getJSONObject(1)
+            .getJSONObject("seats").getJSONArray("timekeeper").getJSONObject(0).getString("associationId")
+        )
     }
 
     @Test

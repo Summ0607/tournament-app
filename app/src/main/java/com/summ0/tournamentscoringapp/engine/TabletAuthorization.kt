@@ -34,18 +34,20 @@ fun parseRingPairingCode(text: String): RingPairingCode {
 
 object TabletAuthorization {
     private const val PREFS = "tablet_authorization"
-    private data class Credential(val server: String, val ring: String, val token: String)
+    private data class Credential(val server: String, val event: String, val ring: String, val token: String)
     @Volatile private var credential: Credential? = null
 
     fun initialize(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val server = prefs.getString("server", "").orEmpty()
+        val event = prefs.getString("event", "").orEmpty()
         val token = prefs.getString("credential", "").orEmpty()
         credential = if (server.isNotBlank() && token.matches(Regex("[a-f0-9]{64}")))
-            Credential(server, prefs.getString("ring", "").orEmpty(), token) else null
+            Credential(server, event, prefs.getString("ring", "").orEmpty(), token) else null
     }
 
     fun server(): String? = credential?.server
+    fun event(): String? = credential?.event?.takeIf { it.isNotBlank() }
     fun ringId(): String? = credential?.ring
 
     fun deviceId(context: Context): String {
@@ -57,11 +59,14 @@ object TabletAuthorization {
 
     fun save(context: Context, server: String, response: JSONObject) {
         val token = response.getString("credential")
+        val event = response.getString("event")
         val ring = response.getString("ringId")
-        require(token.matches(Regex("[a-f0-9]{64}")) && ring.isNotBlank()) { "Invalid tablet authorization response." }
+        require(token.matches(Regex("[a-f0-9]{64}")) && event.isNotBlank() && ring.isNotBlank()) {
+            "Invalid tablet authorization response."
+        }
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString("server", server).putString("ring", ring).putString("credential", token).apply()
-        credential = Credential(server, ring, token)
+            .putString("server", server).putString("event", event).putString("ring", ring).putString("credential", token).apply()
+        credential = Credential(server, event, ring, token)
     }
 
     fun applyTo(connection: HttpURLConnection) {

@@ -133,6 +133,37 @@ class DivisionStoreTest {
     }
 
     @Test
+    fun ringPhaseServicePacketIsDurableAndReusesItsReceiptIdentity() {
+        val store = DivisionStore(folder.root)
+        store.saveDivision(sampleGroup(20), "qr")
+        store.saveDivision(sampleGroup(21), "network")
+        val firstService = RingPhaseService("ring-a-1", "P1", "20")
+            .seat(ServiceRole.CENTER, ServiceJudge("ID1", "Center Judge", "D5"), at = "t0")
+            .replace(ServiceRole.CENTER, "ID1", ServiceJudge("ID2", "Relief Judge", "D4"), at = "t1")
+        val secondService = RingPhaseService("ring-a-1", "P1", "21")
+            .seat(ServiceRole.TIMEKEEPER, ServiceJudge("ID3", "Timekeeper", "D1"), at = "t2")
+        store.saveService("20", serializeRingPhaseService(firstService))
+        store.saveService("21", serializeRingPhaseService(secondService))
+
+        val prepared = store.prepareServicePacket("ring-a-1", "P1", "Event A")
+        assertEquals(2, prepared.packet.getJSONArray("divisions").length())
+        val submissionId = prepared.packet.getString("submissionId")
+        val reopened = DivisionStore(folder.root)
+        val retry = reopened.prepareServicePacket("ring-a-1", "P1", "Event A")
+        assertEquals(submissionId, retry.packet.getString("submissionId"))
+        assertEquals(prepared.packet.toString(), retry.packet.toString())
+
+        val receipt = JSONObject().put("accepted", true).put("submissionId", submissionId)
+            .put("serverRecordId", "server-record").put("receivedAt", "t3")
+        assertTrue(reopened.acknowledgeServicePacket(submissionId, receipt))
+        val acknowledged = DivisionStore(folder.root).prepareServicePacket("ring-a-1", "P1", "Event A")
+        assertEquals("server-record", acknowledged.acknowledgement?.optString("serverRecordId"))
+        val nextEventPacket = DivisionStore(folder.root).prepareServicePacket("ring-a-1", "P1", "Event B")
+        assertNotNull(nextEventPacket.packet)
+        assertTrue(nextEventPacket.packet.getString("submissionId") != submissionId)
+    }
+
+    @Test
     fun removingADivisionClearsItsFilesAndActiveAnchor() {
         val store = DivisionStore(folder.root)
         store.saveDivision(sampleGroup(20), "network")

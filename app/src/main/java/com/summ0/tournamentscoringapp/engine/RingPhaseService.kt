@@ -3,13 +3,28 @@ package com.summ0.tournamentscoringapp.engine
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
+import java.util.UUID
 
 /** Positions a judge can serve at a ring, matching the server's assignment roles. */
 enum class ServiceRole(val wire: String) {
     CENTER("center"),
     CORNER("corner"),
+    SCOREKEEPER("scorekeeper"),
+    TIMEKEEPER("timekeeper"),
     SKTK("sktk"),
     ARBITRATOR("arbitrator");
+
+    val selectable: Boolean get() = this != SKTK
+
+    val label: String
+        get() = when (this) {
+            CENTER -> "Center"
+            CORNER -> "Corner"
+            SCOREKEEPER -> "Scorekeeper"
+            TIMEKEEPER -> "Timekeeper"
+            SKTK -> "SK/TK (legacy)"
+            ARBITRATOR -> "Arbitrator"
+        }
 
     companion object {
         fun fromWire(value: String): ServiceRole? = entries.firstOrNull { it.wire == value }
@@ -171,6 +186,7 @@ fun parseRingPhaseService(root: JSONObject): RingPhaseService {
                         )
                     )
                 }
+
             }
             if (judges.isNotEmpty()) seats[role] = judges
         }
@@ -201,4 +217,35 @@ fun parseRingPhaseService(root: JSONObject): RingPhaseService {
         seats = seats,
         history = history
     )
+}
+
+fun buildRingPhaseServicePacket(
+    ringId: String,
+    phase: String,
+    services: List<RingPhaseService>,
+    submissionId: String = UUID.randomUUID().toString()
+): JSONObject {
+    require(ringId.isNotBlank()) { "A ring is required for service transfer." }
+    require(phase == "P1" || phase == "P2") { "Select P1 or P2 for service transfer." }
+    val matching = services.filter { it.ringId == ringId && it.phase == phase }
+        .distinctBy { it.groupAnchor }
+        .filter { it.seats.values.any { judges -> judges.isNotEmpty() } || it.history.isNotEmpty() }
+    require(matching.isNotEmpty()) { "No recorded judge service exists for $ringId, $phase." }
+    return JSONObject().apply {
+        put("type", "tournament-judge-service")
+        put("schemaVersion", 1)
+        put("submissionId", submissionId)
+        put("ringId", ringId)
+        put("phase", phase)
+        put("divisions", JSONArray().apply {
+            matching.forEach { service ->
+                val encoded = serializeRingPhaseService(service)
+                put(JSONObject().apply {
+                    put("groupAnchor", service.groupAnchor)
+                    put("seats", encoded.getJSONObject("seats"))
+                    put("history", encoded.getJSONArray("history"))
+                })
+            }
+        })
+    }
 }

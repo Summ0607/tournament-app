@@ -259,6 +259,31 @@ suspend fun probeHttpOk(urlString: String): HttpProbeResult = withContext(Dispat
     }
 }
 
+suspend fun fetchRingJudgePlan(
+    serverBaseUrl: String,
+    ringId: String,
+    phase: String
+): JsonFetchResult {
+    val ring = URLEncoder.encode(ringId, Charsets.UTF_8.name()).replace("+", "%20")
+    val phaseQuery = URLEncoder.encode(phase, Charsets.UTF_8.name())
+    return fetchJsonObject(
+        "${serverBaseUrl.trimEnd('/')}/api/rings/$ring/judge-plan?phase=$phaseQuery"
+    )
+}
+
+suspend fun submitJudgeServicePacket(
+    serverBaseUrl: String,
+    ringId: String,
+    packet: JSONObject
+): JsonFetchResult {
+    val ring = URLEncoder.encode(ringId, Charsets.UTF_8.name()).replace("+", "%20")
+    return fetchJsonObject(
+        "${serverBaseUrl.trimEnd('/')}/api/rings/$ring/service-packets",
+        method = "POST",
+        jsonBody = packet
+    )
+}
+
 suspend fun fetchRingConfig(urlString: String, tabletLabel: String = ""): RingConfigFetchResult {
     val requestUrl = if (tabletLabel.isBlank()) {
         urlString

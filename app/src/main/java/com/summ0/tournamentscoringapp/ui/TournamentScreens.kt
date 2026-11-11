@@ -29,6 +29,7 @@ import java.time.Instant
 import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import com.journeyapps.barcodescanner.ScanContract
@@ -369,6 +370,62 @@ internal fun CheckInScreen(
     var showJudgeServiceDialog by remember { mutableStateOf(false) }
     var storedDivisionRecords by remember { mutableStateOf(emptyList<DivisionRecord>()) }
     var currentService by remember { mutableStateOf<RingPhaseService?>(null) }
+    var judgeServicePhase by rememberSaveable { mutableStateOf("P1") }
+    var serviceTransferStatus by remember { mutableStateOf("") }
+    var isSubmittingService by remember { mutableStateOf(false) }
+    var judgePlanSummary by remember { mutableStateOf("") }
+    var pendingServicePacketExport by remember { mutableStateOf("") }
+    val servicePacketExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri == null) {
+            serviceTransferStatus = "USB packet export was cancelled. The packet remains saved on this tablet."
+        } else {
+            val payload = pendingServicePacketExport
+            screenScope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val output = appContext.contentResolver.openOutputStream(uri)
+                            ?: throw IllegalStateException("Unable to open the selected USB destination.")
+                        output.bufferedWriter(Charsets.UTF_8).use { it.write(payload) }
+                    }
+                    serviceTransferStatus = "Service packet saved. Import it in Judge Management, then bring its receipt back here."
+                } catch (error: Exception) {
+                    serviceTransferStatus = error.message ?: "Unable to save the service packet to USB."
+                }
+            }
+        }
+    }
+    val serviceReceiptImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            screenScope.launch {
+                try {
+                    val receipt = withContext(Dispatchers.IO) {
+                        val input = appContext.contentResolver.openInputStream(uri)
+                            ?: throw IllegalStateException("Unable to open the selected receipt.")
+                        input.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
+                    }
+                    val acknowledgement = receipt.optJSONObject("acknowledgement") ?: receipt
+                    val submissionId = acknowledgement.optString("submissionId")
+                    if (!acknowledgement.optBoolean("accepted") || submissionId.isBlank()) {
+                        throw IllegalArgumentException("The selected file is not an accepted service receipt.")
+                    }
+                    val saved = withContext(Dispatchers.IO) {
+                        divisionStore.acknowledgeServicePacket(submissionId, acknowledgement)
+                    }
+                    serviceTransferStatus = if (saved) {
+                        "USB receipt saved for service packet $submissionId."
+                    } else {
+                        "This receipt does not match a pending service packet on this tablet."
+                    }
+                } catch (error: Exception) {
+                    serviceTransferStatus = error.message ?: "Unable to import the service receipt."
+                }
+            }
+        }
+    }
 
     val weaponsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
         val lockedWeaponsIds = phaseEntrants[CompetitionType.WEAPONS]
@@ -677,6 +734,8 @@ internal fun CheckInScreen(
         activeDivisionAnchor = anchor
         divisionStore.setActiveAnchor(anchor)
         currentService = divisionStore.loadService(anchor)?.let { parseRingPhaseService(it) }
+            ?.let { if (it.phase == "P1" || it.phase == "P2") it else it.copy(phase = "P1") }
+        judgeServicePhase = currentService?.phase ?: "P1"
         showStoredDivisions = false
         val divisionLabel = formatDivisionDisplayLabel(
             stored.effectiveDivisionNumber(),
@@ -694,6 +753,9 @@ internal fun CheckInScreen(
         }
         applyLoadedGroup(content.group, persist = true, source = "qr")
         currentService = null
+        judgeServicePhase = "P1"
+        serviceTransferStatus = ""
+        judgePlanSummary = ""
         refreshStoredDivisions()
         val divisionLabel = formatDivisionDisplayLabel(
             content.group.effectiveDivisionNumber(),
@@ -740,10 +802,162 @@ internal fun CheckInScreen(
 
     fun persistCurrentService(service: RingPhaseService) {
         currentService = service
+        judgeServicePhase = service.phase
         val anchor = activeDivisionAnchor
         if (anchor.isNotBlank()) {
             divisionStore.saveService(anchor, serializeRingPhaseService(service))
         }
+    }
+
+    fun selectJudgeServicePhase(phase: String): RingPhaseService {
+        require(phase == "P1" || phase == "P2")
+        val anchor = activeDivisionAnchor
+        val existing = anchor.takeIf { it.isNotBlank() }
+            ?.let { divisionStore.loadService(it, phase) }
+            ?.let(::parseRingPhaseService)
+        val service = existing?.copy(
+            ringId = currentRingId.ifBlank { existing.ringId },
+            phase = phase,
+            groupAnchor = anchor
+        ) ?: RingPhaseService(
+            ringId = currentRingId,
+            phase = phase,
+            groupAnchor = anchor
+        )
+        currentService = service
+        judgeServicePhase = phase
+        if (anchor.isNotBlank()) divisionStore.saveService(anchor, serializeRingPhaseService(service))
+        return service
+    }
+
+    fun loadJudgePlan(phase: String) {
+        val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
+        if (ringId.isBlank()) {
+            judgePlanSummary = "Authorize a ring before loading its saved plan."
+            return
+        }
+        screenScope.launch {
+            judgePlanSummary = "Loading saved assignment plan..."
+            val server = TabletAuthorization.server() ?: serverBaseUrl
+            val result = fetchRingJudgePlan(server, ringId, phase)
+            val root = result.root
+            if (root == null) {
+                judgePlanSummary = result.errorMessage ?: "Unable to load the saved assignment plan."
+                return@launch
+            }
+            if (root.optString("type") != "tournament-judge-plan" || root.optString("ringId") != ringId ||
+                root.optString("phase") != phase) {
+                judgePlanSummary = "The server returned a mismatched judge assignment plan."
+                return@launch
+            }
+            if (!root.optBoolean("assigned")) {
+                judgePlanSummary = "No saved assignment exists for $ringId, $phase."
+                return@launch
+            }
+            val positions = root.optJSONObject("positions") ?: JSONObject()
+            judgePlanSummary = listOf("center", "corner", "sktk").joinToString(" · ") { role ->
+                val names = positions.optJSONArray(role)?.let { officials ->
+                    (0 until officials.length()).mapNotNull { index ->
+                        officials.optJSONObject(index)?.let { official ->
+                            "${official.optString("name")} (${official.optString("associationId")})"
+                        }
+                    }
+                }.orEmpty()
+                "${role.uppercase()}: ${names.joinToString()}"
+            }
+        }
+    }
+
+    fun submitJudgeServicePacket() {
+        if (isSubmittingService) return
+        val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
+        if (ringId.isBlank()) {
+            serviceTransferStatus = "Authorize a ring before transferring service."
+            return
+        }
+        val eventName = TabletAuthorization.event()
+        if (eventName.isNullOrBlank()) {
+            serviceTransferStatus = "Re-scan this tournament's daily ring QR code before transferring service."
+            return
+        }
+        val phase = currentService?.phase ?: judgeServicePhase
+        isSubmittingService = true
+        serviceTransferStatus = "Preparing the durable ring-phase packet..."
+        screenScope.launch {
+            try {
+                val stored = withContext(Dispatchers.IO) {
+                    divisionStore.prepareServicePacket(ringId, phase, eventName)
+                }
+                if (stored.acknowledgement != null) {
+                    serviceTransferStatus = "Already acknowledged by the server at ${stored.acknowledgement.optString("receivedAt")}."
+                    return@launch
+                }
+                val server = TabletAuthorization.server() ?: serverBaseUrl
+                val result = submitJudgeServicePacket(server, ringId, stored.packet)
+                val receipt = result.root
+                if (receipt == null) {
+                    serviceTransferStatus = result.errorMessage ?: "The service packet was not acknowledged; it is saved for retry."
+                    return@launch
+                }
+                val submissionId = stored.packet.optString("submissionId")
+                if (!receipt.optBoolean("accepted") || receipt.optString("submissionId") != submissionId ||
+                    receipt.optString("serverRecordId").isBlank()) {
+                    serviceTransferStatus = "The server response did not acknowledge this service packet; it is saved for retry."
+                    return@launch
+                }
+                val saved = withContext(Dispatchers.IO) {
+                    divisionStore.acknowledgeServicePacket(submissionId, receipt)
+                }
+                serviceTransferStatus = if (saved) {
+                    "Service acknowledged at ${receipt.optString("receivedAt")}."
+                } else {
+                    "The server accepted the packet, but its receipt could not be saved locally. Retry to recover the same receipt."
+                }
+            } catch (error: Exception) {
+                serviceTransferStatus = error.message ?: "Unable to transfer judge service."
+            } finally {
+                isSubmittingService = false
+            }
+        }
+    }
+
+    fun exportJudgeServicePacketToUsb() {
+        val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
+        if (ringId.isBlank()) {
+            serviceTransferStatus = "Authorize a ring before exporting service."
+            return
+        }
+        val eventName = TabletAuthorization.event()
+        if (eventName.isNullOrBlank()) {
+            serviceTransferStatus = "Pair this tablet with a tournament before exporting service."
+            return
+        }
+        val phase = currentService?.phase ?: judgeServicePhase
+        screenScope.launch {
+            try {
+                val stored = withContext(Dispatchers.IO) {
+                    divisionStore.prepareServicePacket(ringId, phase, eventName)
+                }
+                if (stored.acknowledgement != null) {
+                    serviceTransferStatus = "This service packet is already acknowledged by the server."
+                    return@launch
+                }
+                val envelope = JSONObject().apply {
+                    put("type", "tournament-judge-service-transfer")
+                    put("schemaVersion", 1)
+                    put("eventName", eventName)
+                    put("packet", stored.packet)
+                }
+                pendingServicePacketExport = envelope.toString(2)
+                servicePacketExportLauncher.launch("judge-service-$ringId-${phase}-${stored.packet.optString("submissionId")}.json")
+            } catch (error: Exception) {
+                serviceTransferStatus = error.message ?: "Unable to prepare the service packet for USB."
+            }
+        }
+    }
+
+    fun selectServiceReceiptFromUsb() {
+        serviceReceiptImportLauncher.launch(arrayOf("application/json", "text/plain"))
     }
 
     fun moveToScreen(nextScreen: CompetitionScreen, resetControlBoardPhase: Boolean = false) {
@@ -1129,10 +1343,18 @@ internal fun CheckInScreen(
         JudgeServiceDialog(
             service = currentService ?: RingPhaseService(
                 ringId = currentRingId,
-                phase = controlBoardPhase,
+                phase = judgeServicePhase,
                 groupAnchor = activeDivisionAnchor
             ),
             onUpdate = { persistCurrentService(it) },
+            onPhaseChange = { selectJudgeServicePhase(it) },
+            onLoadPlan = { loadJudgePlan(it) },
+            planSummary = judgePlanSummary,
+            transferStatus = serviceTransferStatus,
+            isTransferring = isSubmittingService,
+            onSubmit = { submitJudgeServicePacket() },
+            onExportUsb = { exportJudgeServicePacketToUsb() },
+            onImportUsbReceipt = { selectServiceReceiptFromUsb() },
             onDismiss = { showJudgeServiceDialog = false }
         )
     }
@@ -1159,6 +1381,8 @@ internal fun CheckInScreen(
         if (activeDivisionAnchor.isNotBlank()) {
             currentService = withContext(Dispatchers.IO) { divisionStore.loadService(activeDivisionAnchor) }
                 ?.let { parseRingPhaseService(it) }
+                ?.let { if (it.phase == "P1" || it.phase == "P2") it else it.copy(phase = "P1") }
+            judgeServicePhase = currentService?.phase ?: "P1"
         }
         if (TabletAuthorization.server() != null) reconnectCurrentRing()
         else refreshLaunchRingOptions()
@@ -2568,14 +2792,23 @@ private fun StoredDivisionsDialog(
 private fun JudgeServiceDialog(
     service: RingPhaseService,
     onUpdate: (RingPhaseService) -> Unit,
+    onPhaseChange: (String) -> RingPhaseService,
+    onLoadPlan: (String) -> Unit,
+    planSummary: String,
+    transferStatus: String,
+    isTransferring: Boolean,
+    onSubmit: () -> Unit,
+    onExportUsb: () -> Unit,
+    onImportUsbReceipt: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var working by remember { mutableStateOf(service) }
-    var selectedRole by remember { mutableStateOf(ServiceRole.CENTER) }
+    var working by remember(service) { mutableStateOf(service) }
+    var selectedRole by remember(working.phase) { mutableStateOf(ServiceRole.CENTER) }
     var associationId by remember { mutableStateOf("") }
     var judgeName by remember { mutableStateOf("") }
     var judgeRank by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
+    var showTransferConfirmation by remember { mutableStateOf(false) }
 
     fun commit(next: RingPhaseService) {
         working = next
@@ -2590,6 +2823,22 @@ private fun JudgeServiceDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                Text("Assignment phase", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("P1", "P2").forEach { phase ->
+                        OutlinedButton(
+                            onClick = {
+                                working = onPhaseChange(phase)
+                                message = null
+                            },
+                            enabled = !isTransferring
+                        ) { Text(phase) }
+                    }
+                    OutlinedButton(onClick = { onLoadPlan(working.phase) }, enabled = !isTransferring) {
+                        Text("Check saved plan")
+                    }
+                }
+                if (planSummary.isNotBlank()) Text(planSummary, fontSize = 12.sp)
                 Text("Current lineup", fontWeight = FontWeight.SemiBold)
                 if (working.seats.values.all { it.isEmpty() }) {
                     Text("No judges recorded yet.", fontSize = 13.sp)
@@ -2597,7 +2846,7 @@ private fun JudgeServiceDialog(
                     ServiceRole.entries.forEach { role ->
                         val judges = working.seats[role].orEmpty()
                         if (judges.isNotEmpty()) {
-                            Text(role.wire.replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            Text(role.label, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                             judges.forEach { judge ->
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -2623,7 +2872,7 @@ private fun JudgeServiceDialog(
                     modifier = Modifier.horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    ServiceRole.entries.forEach { role ->
+                    ServiceRole.entries.filter { it.selectable }.forEach { role ->
                         val selected = role == selectedRole
                         OutlinedButton(
                             onClick = { selectedRole = role },
@@ -2633,7 +2882,7 @@ private fun JudgeServiceDialog(
                                 ButtonDefaults.outlinedButtonColors()
                             }
                         ) {
-                            Text(role.wire.replaceFirstChar { it.uppercase() }, fontSize = 12.sp)
+                            Text(role.label, fontSize = 12.sp)
                         }
                     }
                 }
@@ -2667,6 +2916,10 @@ private fun JudgeServiceDialog(
                                 return@Button
                             }
                             val judge = ServiceJudge(associationId, judgeName.trim(), judgeRank.trim())
+                            if (working.roleOf(associationId) != null && working.roleOf(associationId) != selectedRole) {
+                                message = "That judge is already seated in another role. Use Swap role instead."
+                                return@Button
+                            }
                             val existing = working.seats[selectedRole].orEmpty()
                             commit(
                                 if (existing.isNotEmpty()) {
@@ -2695,10 +2948,62 @@ private fun JudgeServiceDialog(
                         modifier = Modifier.weight(1f)
                     ) { Text("Swap role") }
                 }
+                if (transferStatus.isNotBlank()) Text(transferStatus, fontSize = 12.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { showTransferConfirmation = true },
+                        enabled = !isTransferring,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Save packet to USB", fontSize = 12.sp) }
+                    OutlinedButton(
+                        onClick = onImportUsbReceipt,
+                        enabled = !isTransferring,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Import USB receipt", fontSize = 12.sp) }
+                }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } }
+        confirmButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { showTransferConfirmation = true }, enabled = !isTransferring) {
+                    Text(if (isTransferring) "Transferring..." else "Transfer ring-phase service")
+                }
+                TextButton(onClick = onDismiss) { Text("Done") }
+            }
+        }
     )
+    if (showTransferConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showTransferConfirmation = false },
+            title = { Text("Finalize ring-phase service?") },
+            text = {
+                Text(
+                    "This creates one final packet for ${working.ringId}, ${working.phase}. " +
+                        "A different packet for this ring and phase cannot be accepted afterward. " +
+                        "Confirm all division service, replacements, and role swaps are recorded."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showTransferConfirmation = false
+                        onSubmit()
+                    }
+                ) { Text("Transfer online") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            showTransferConfirmation = false
+                            onExportUsb()
+                        }
+                    ) { Text("Save to USB") }
+                    TextButton(onClick = { showTransferConfirmation = false }) { Text("Review") }
+                }
+            }
+        )
+    }
 }
 
 @Composable

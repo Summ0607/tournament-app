@@ -21,6 +21,12 @@ enum class DivisionRecordStatus {
     }
 }
 
+data class StoredServicePacket(
+    val packet: JSONObject,
+    val acknowledgement: JSONObject?,
+    val eventName: String
+)
+
 /** Catalog entry for one stored division. */
 data class DivisionRecord(
     val anchor: String,
@@ -117,6 +123,7 @@ fun parseStoredDivision(root: JSONObject): RemoteGroup {
 class DivisionStore(baseDir: File) {
     private val rootDir = File(baseDir, "divisions")
     private val indexFile = File(rootDir, "index.json")
+    private val servicePacketsDir = File(rootDir, "service-packets")
 
     fun saveDivision(group: RemoteGroup, source: String): DivisionRecord {
         val anchor = divisionAnchor(group)
@@ -178,18 +185,84 @@ class DivisionStore(baseDir: File) {
 
     fun saveService(anchor: String, service: JSONObject): Boolean {
         if (record(anchor) == null) return false
-        writeAtomic(serviceFile(anchor), service.toString(2))
+        val phase = service.optString("phase", "")
+        val target = if (phase == "P1" || phase == "P2") phaseServiceFile(anchor, phase) else serviceFile(anchor)
+        writeAtomic(target, service.toString(2))
         return true
     }
 
-    fun loadService(anchor: String): JSONObject? {
-        val file = serviceFile(anchor)
-        if (!file.isFile) return null
+    fun loadService(anchor: String, phase: String? = null): JSONObject? {
+        val file = when (phase) {
+            "P1", "P2" -> phaseServiceFile(anchor, phase).takeIf { it.isFile }
+                ?: if (phaseServiceFile(anchor, if (phase == "P1") "P2" else "P1").isFile) null
+                else serviceFile(anchor)
+            else -> listOf("P1", "P2").map { phaseServiceFile(anchor, it) }.firstOrNull { it.isFile }
+                ?: serviceFile(anchor)
+        }
+        if (file == null || !file.isFile) return null
         return try {
             JSONObject(file.readText())
         } catch (_: Exception) {
             null
         }
+    }
+
+    fun prepareServicePacket(ringId: String, phase: String, eventName: String): StoredServicePacket {
+        require(phase == "P1" || phase == "P2") { "Select P1 or P2 for service transfer." }
+        require(eventName.isNotBlank()) { "Pair this tablet with a tournament before transferring service." }
+        servicePacketsDir.mkdirs()
+        val storedPackets = servicePacketsDir.listFiles()
+            ?.filter { it.isFile && it.name.matches(Regex("[a-fA-F0-9-]{36}\\.json")) }
+            .orEmpty()
+        for (file in storedPackets) {
+            val envelope = try {
+                JSONObject(file.readText())
+            } catch (error: Exception) {
+                throw IOException("Unable to read saved service packet ${file.name}", error)
+            }
+            if (envelope.optInt("schemaVersion", 0) != 1) {
+                throw IOException("Unsupported saved service packet ${file.name}")
+            }
+            val existing = envelope.optJSONObject("packet")
+                ?: throw IOException("Saved service packet ${file.name} is missing its payload")
+            if (envelope.optString("eventName") == eventName &&
+                existing.optString("ringId") == ringId && existing.optString("phase") == phase) {
+                return StoredServicePacket(
+                    packet = existing,
+                    acknowledgement = envelope.optJSONObject("acknowledgement"),
+                    eventName = eventName
+                )
+            }
+        }
+        val services = listDivisions().mapNotNull { record ->
+            loadPhaseServiceForPacket(record.anchor, phase)
+        }.map(::parseRingPhaseService)
+        val packet = buildRingPhaseServicePacket(ringId, phase, services)
+        writeAtomic(servicePacketFile(packet.getString("submissionId")), JSONObject().apply {
+            put("schemaVersion", 1)
+            put("eventName", eventName)
+            put("packet", packet)
+            put("acknowledgement", JSONObject.NULL)
+        }.toString(2))
+        return StoredServicePacket(packet, null, eventName)
+    }
+
+    fun acknowledgeServicePacket(submissionId: String, acknowledgement: JSONObject): Boolean {
+        if (!submissionId.matches(Regex("[a-fA-F0-9-]{36}"))) return false
+        val file = servicePacketFile(submissionId)
+        if (!file.isFile) return false
+        val envelope = try {
+            JSONObject(file.readText())
+        } catch (_: Exception) {
+            return false
+        }
+        if (envelope.optJSONObject("packet")?.optString("submissionId") != submissionId ||
+            acknowledgement.optBoolean("accepted") != true ||
+            acknowledgement.optString("submissionId") != submissionId ||
+            acknowledgement.optString("serverRecordId").isBlank()) return false
+        envelope.put("acknowledgement", acknowledgement)
+        writeAtomic(file, envelope.toString(2))
+        return true
     }
 
     fun markCompleted(anchor: String) {
@@ -222,9 +295,22 @@ class DivisionStore(baseDir: File) {
 
     private fun serviceFile(anchor: String) = File(File(rootDir, anchor), "service.json")
 
+    private fun phaseServiceFile(anchor: String, phase: String) = File(File(rootDir, anchor), "service-$phase.json")
+
+    private fun loadPhaseServiceForPacket(anchor: String, phase: String): JSONObject? {
+        val file = phaseServiceFile(anchor, phase)
+        if (!file.isFile) return null
+        return JSONObject(file.readText()).takeIf {
+            it.optString("ringId").isNotBlank() && it.optString("phase") == phase
+        }
+    }
+
+    private fun servicePacketFile(submissionId: String) = File(servicePacketsDir, "$submissionId.json")
+
     fun hasSession(anchor: String): Boolean = sessionFile(anchor).isFile
 
-    fun hasService(anchor: String): Boolean = serviceFile(anchor).isFile
+    fun hasService(anchor: String): Boolean = serviceFile(anchor).isFile ||
+        phaseServiceFile(anchor, "P1").isFile || phaseServiceFile(anchor, "P2").isFile
 
     private fun touch(anchor: String, transform: (DivisionRecord) -> DivisionRecord) {
         updateIndex { index ->
