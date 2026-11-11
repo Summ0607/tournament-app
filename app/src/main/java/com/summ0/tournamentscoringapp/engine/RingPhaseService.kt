@@ -55,7 +55,10 @@ data class ServiceHistoryEntry(
     val action: ServiceAction,
     val role: ServiceRole,
     val judgeAssociationId: String,
-    val previousJudgeAssociationId: String? = null
+    val previousJudgeAssociationId: String? = null,
+    val assignmentRevision: String? = null,
+    val replacementPinVerified: Boolean? = null,
+    val requiresCoordinatorReview: Boolean = false
 )
 
 /**
@@ -93,8 +96,12 @@ data class RingPhaseService(
         role: ServiceRole,
         outgoingAssociationId: String,
         incoming: ServiceJudge,
+        assignmentRevision: String,
+        replacementPinVerified: Boolean,
         at: String = Instant.now().toString()
     ): RingPhaseService {
+        require(assignmentRevision.isNotBlank()) { "Load the saved assignment plan before recording a replacement." }
+        require(replacementPinVerified) { "A valid event replacement PIN is required." }
         val current = seats[role].orEmpty()
         if (current.none { it.associationId == outgoingAssociationId }) return this
         val nextSeats = seats.toMutableMap()
@@ -102,7 +109,14 @@ data class RingPhaseService(
         return copy(
             seats = nextSeats,
             history = history + ServiceHistoryEntry(
-                at, ServiceAction.REPLACED, role, incoming.associationId, outgoingAssociationId
+                at = at,
+                action = ServiceAction.REPLACED,
+                role = role,
+                judgeAssociationId = incoming.associationId,
+                previousJudgeAssociationId = outgoingAssociationId,
+                assignmentRevision = assignmentRevision,
+                replacementPinVerified = true,
+                requiresCoordinatorReview = true
             )
         )
     }
@@ -163,6 +177,9 @@ fun serializeRingPhaseService(service: RingPhaseService): JSONObject {
                     put("role", entry.role.wire)
                     put("judgeAssociationId", entry.judgeAssociationId)
                     put("previousJudgeAssociationId", entry.previousJudgeAssociationId ?: JSONObject.NULL)
+                    entry.assignmentRevision?.let { put("assignmentRevision", it) }
+                    entry.replacementPinVerified?.let { put("replacementPinVerified", it) }
+                    if (entry.requiresCoordinatorReview) put("requiresCoordinatorReview", true)
                 })
             }
         })
@@ -206,6 +223,21 @@ fun parseRingPhaseService(root: JSONObject): RingPhaseService {
                     null
                 } else {
                     item.optString("previousJudgeAssociationId").ifBlank { null }
+                },
+                assignmentRevision = if (item.isNull("assignmentRevision")) {
+                    null
+                } else {
+                    item.optString("assignmentRevision").ifBlank { null }
+                },
+                replacementPinVerified = if (item.has("replacementPinVerified")) {
+                    item.getBoolean("replacementPinVerified")
+                } else {
+                    null
+                },
+                requiresCoordinatorReview = if (item.has("requiresCoordinatorReview")) {
+                    item.getBoolean("requiresCoordinatorReview")
+                } else {
+                    false
                 }
             )
         }

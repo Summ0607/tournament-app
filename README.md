@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.51 (52)**. The installed version is shown beneath
+This checkpoint is version **1.52 (53)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.51 (52)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.52 (53)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -162,6 +162,13 @@ Center, Corner, and SK/TK judge. Mark each person **Present**, **Absent**, or
 clear the status back to **Unconfirmed**. Attendance is stored locally against
 the assignment revision, survives app restarts, and is not included in division
 results or treated as service experience.
+
+Replacing a seated judge requires selecting the outgoing judge and entering the
+event's four-character PIN. The app verifies it locally against the saved
+event/ring/phase plan, so replacement works offline; an incorrect PIN blocks
+the change. The raw PIN is never stored or transferred. Each successful
+replacement records the assignment revision and a coordinator-review flag,
+which the service packet carries to server intake.
 
 **Transfer ring-phase service** consolidates all locally stored division
 histories for that ring and phase into one packet with its own submission ID.

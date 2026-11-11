@@ -110,6 +110,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.window.DialogProperties
 import com.summ0.tournamentscoringapp.engine.CheckInStatus
 import com.summ0.tournamentscoringapp.engine.CompetitionEntry
@@ -2930,11 +2931,14 @@ private fun JudgeServiceDialog(
     onDismiss: () -> Unit
 ) {
     var working by remember(service) { mutableStateOf(service) }
-    var selectedRole by remember(working.phase) { mutableStateOf(ServiceRole.CENTER) }
+    var selectedRole by remember(working.groupAnchor, working.phase) { mutableStateOf(ServiceRole.CENTER) }
     var associationId by remember { mutableStateOf("") }
     var judgeName by remember { mutableStateOf("") }
     var judgeRank by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf<String?>(null) }
+    var replacementTargetId by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
+    var replacementPin by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
+    var message by remember(working.groupAnchor, working.phase) { mutableStateOf<String?>(null) }
+    var messageIsError by remember(working.groupAnchor, working.phase) { mutableStateOf(false) }
     var showTransferConfirmation by remember { mutableStateOf(false) }
 
     fun commit(next: RingPhaseService) {
@@ -2942,11 +2946,15 @@ private fun JudgeServiceDialog(
         onUpdate(next)
     }
 
+    val pairedEvent = TabletAuthorization.event()
     val planMatches = judgePlan?.let {
         it.optBoolean("assigned") &&
             it.optString("ringId") == working.ringId &&
-            it.optString("phase") == working.phase
+            it.optString("phase") == working.phase &&
+            !pairedEvent.isNullOrBlank() &&
+            it.optString("eventName") == pairedEvent
     } == true
+    val replacementPinAvailable = planMatches && hasReplacementPinVerifier(judgePlan)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2962,7 +2970,10 @@ private fun JudgeServiceDialog(
                         OutlinedButton(
                             onClick = {
                                 working = onPhaseChange(phase)
+                                replacementTargetId = ""
+                                replacementPin = ""
                                 message = null
+                                messageIsError = false
                             },
                             enabled = !isTransferring && !isSavingAttendance
                         ) { Text(phase) }
@@ -3051,9 +3062,26 @@ private fun JudgeServiceDialog(
                                         fontSize = 13.sp,
                                         modifier = Modifier.weight(1f)
                                     )
-                                    TextButton(onClick = { commit(working.unseat(judge.associationId)) }) {
-                                        Text("Remove")
-                                    }
+                                TextButton(
+                                    onClick = {
+                                        selectedRole = role
+                                        replacementTargetId = judge.associationId
+                                        replacementPin = ""
+                                        message = null
+                                        messageIsError = false
+                                    },
+                                    enabled = !isTransferring && !isSavingAttendance
+                                ) { Text("Replace") }
+                                TextButton(
+                                    onClick = {
+                                        if (replacementTargetId == judge.associationId) {
+                                            replacementTargetId = ""
+                                            replacementPin = ""
+                                        }
+                                        commit(working.unseat(judge.associationId))
+                                    },
+                                    enabled = !isTransferring && !isSavingAttendance
+                                ) { Text("Remove") }
                                 }
                             }
                         }
@@ -3068,7 +3096,13 @@ private fun JudgeServiceDialog(
                     ServiceRole.entries.filter { it.selectable }.forEach { role ->
                         val selected = role == selectedRole
                         OutlinedButton(
-                            onClick = { selectedRole = role },
+                            onClick = {
+                                selectedRole = role
+                                replacementTargetId = ""
+                                replacementPin = ""
+                                message = null
+                                messageIsError = false
+                            },
                             colors = if (selected) {
                                 ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
                             } else {
@@ -3100,44 +3134,131 @@ private fun JudgeServiceDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-                message?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+                if (replacementTargetId.isNotBlank()) {
+                    val target = working.seats[selectedRole].orEmpty()
+                        .firstOrNull { it.associationId == replacementTargetId }
+                    Text(
+                        target?.let { "Replacing ${it.name.ifBlank { "Judge" }} (${it.associationId}). This replacement will require coordinator review." }
+                            ?: "The selected judge is no longer seated in ${selectedRole.label}.",
+                        color = if (target != null) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp
+                    )
+                    if (!replacementPinAvailable) {
+                        Text(
+                            "Load this event's assignment plan with replacement PIN verification before replacing a judge.",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp
+                        )
+                    }
+                    OutlinedTextField(
+                        value = replacementPin,
+                        onValueChange = { replacementPin = it.take(4) },
+                        label = { Text("Event replacement PIN") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.None,
+                            keyboardType = KeyboardType.Ascii
+                        ),
+                        enabled = replacementPinAvailable && target != null && !isTransferring,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                message?.let {
+                    Text(
+                        it,
+                        color = if (messageIsError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        fontSize = 12.sp
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = {
                             if (associationId.isBlank()) {
                                 message = "Association ID is required."
+                                messageIsError = true
                                 return@Button
                             }
                             val judge = ServiceJudge(associationId, judgeName.trim(), judgeRank.trim())
-                            if (working.roleOf(associationId) != null && working.roleOf(associationId) != selectedRole) {
-                                message = "That judge is already seated in another role. Use Swap role instead."
+                            val target = working.seats[selectedRole].orEmpty()
+                                .firstOrNull { it.associationId == replacementTargetId }
+                            if (replacementTargetId.isNotBlank()) {
+                                if (target == null) {
+                                    message = "Select a judge who is still seated in this role to replace."
+                                    messageIsError = true
+                                    return@Button
+                                }
+                                if (!replacementPinAvailable) {
+                                    message = "A replacement PIN verifier for this event and phase is required."
+                                    messageIsError = true
+                                    return@Button
+                                }
+                                if (!verifyReplacementPin(judgePlan, replacementPin)) {
+                                    message = "The event replacement PIN is invalid. No replacement was recorded."
+                                    messageIsError = true
+                                    return@Button
+                                }
+                                if (associationId.equals(target.associationId, ignoreCase = true)) {
+                                    message = "The incoming judge must be different from the judge being replaced."
+                                    messageIsError = true
+                                    return@Button
+                                }
+                                if (working.roleOf(associationId) != null) {
+                                    message = "That judge is already seated. Use Swap role if they are serving another role."
+                                    messageIsError = true
+                                    return@Button
+                                }
+                                val revision = judgePlan?.optString("assignmentRevision").orEmpty()
+                                commit(
+                                    working.replace(
+                                        selectedRole,
+                                        target.associationId,
+                                        judge,
+                                        assignmentRevision = revision,
+                                        replacementPinVerified = true
+                                    )
+                                )
+                                replacementTargetId = ""
+                                replacementPin = ""
+                                associationId = ""; judgeName = ""; judgeRank = ""
+                                message = "Replacement recorded. The PIN is not saved; coordinator review is required."
+                                messageIsError = false
                                 return@Button
                             }
-                            val existing = working.seats[selectedRole].orEmpty()
-                            commit(
-                                if (existing.isNotEmpty()) {
-                                    working.replace(selectedRole, existing.first().associationId, judge)
-                                } else {
-                                    working.seat(selectedRole, judge)
-                                }
-                            )
+                            if (working.roleOf(associationId) != null) {
+                                message = "That judge is already seated. Use Swap role if they are serving another role."
+                                messageIsError = true
+                                return@Button
+                            }
+                            if (selectedRole != ServiceRole.CORNER && working.seats[selectedRole].orEmpty().isNotEmpty()) {
+                                message = "A ${selectedRole.label} is already seated. Select that judge's Replace action to replace them."
+                                messageIsError = true
+                                return@Button
+                            }
+                            commit(working.seat(selectedRole, judge))
                             associationId = ""; judgeName = ""; judgeRank = ""; message = null
+                            messageIsError = false
                         },
+                        enabled = !isTransferring && !isSavingAttendance,
                         modifier = Modifier.weight(1f)
-                    ) { Text("Seat / Replace") }
+                    ) { Text(if (replacementTargetId.isBlank()) "Seat judge" else "Replace selected") }
                     OutlinedButton(
                         onClick = {
                             if (associationId.isBlank()) {
                                 message = "Association ID is required."
+                                messageIsError = true
                                 return@OutlinedButton
                             }
                             if (working.roleOf(associationId) == null) {
                                 message = "That judge is not seated yet; seat them first."
+                                messageIsError = true
                                 return@OutlinedButton
                             }
                             commit(working.swapRole(associationId, selectedRole))
                             associationId = ""; judgeName = ""; judgeRank = ""; message = null
+                            messageIsError = false
                         },
+                        enabled = !isTransferring && !isSavingAttendance,
                         modifier = Modifier.weight(1f)
                     ) { Text("Swap role") }
                 }

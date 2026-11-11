@@ -211,7 +211,14 @@ class DivisionStoreTest {
         store.saveDivision(sampleGroup(21), "network")
         val firstService = RingPhaseService("ring-a-1", "P1", "20")
             .seat(ServiceRole.CENTER, ServiceJudge("ID1", "Center Judge", "D5"), at = "t0")
-            .replace(ServiceRole.CENTER, "ID1", ServiceJudge("ID2", "Relief Judge", "D4"), at = "t1")
+            .replace(
+                ServiceRole.CENTER,
+                "ID1",
+                ServiceJudge("ID2", "Relief Judge", "D4"),
+                assignmentRevision = "revision-1",
+                replacementPinVerified = true,
+                at = "t1"
+            )
         val secondService = RingPhaseService("ring-a-1", "P1", "21")
             .seat(ServiceRole.TIMEKEEPER, ServiceJudge("ID3", "Timekeeper", "D1"), at = "t2")
         store.saveService("20", serializeRingPhaseService(firstService))

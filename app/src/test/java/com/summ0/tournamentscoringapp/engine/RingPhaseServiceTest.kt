@@ -2,6 +2,7 @@ package com.summ0.tournamentscoringapp.engine
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -33,14 +34,56 @@ class RingPhaseServiceTest {
         val service = base()
             .seat(ServiceRole.CORNER, corner1, at = "t0")
             .seat(ServiceRole.CORNER, corner2, at = "t1")
-            .replace(ServiceRole.CORNER, "TSD-201", reliefCorner, at = "t2")
+            .replace(
+                ServiceRole.CORNER,
+                "TSD-201",
+                reliefCorner,
+                assignmentRevision = "revision-1",
+                replacementPinVerified = true,
+                at = "t2"
+            )
         assertEquals(listOf(reliefCorner, corner2), service.seats[ServiceRole.CORNER])
         val last = service.history.last()
         assertEquals(ServiceAction.REPLACED, last.action)
         assertEquals("TSD-203", last.judgeAssociationId)
         assertEquals("TSD-201", last.previousJudgeAssociationId)
+        assertEquals("revision-1", last.assignmentRevision)
+        assertEquals(true, last.replacementPinVerified)
+        assertTrue(last.requiresCoordinatorReview)
         // Replacing someone who is not seated is a no-op.
-        assertEquals(service, service.replace(ServiceRole.CORNER, "TSD-999", reliefCorner))
+        assertEquals(
+            service,
+            service.replace(
+                ServiceRole.CORNER,
+                "TSD-999",
+                reliefCorner,
+                assignmentRevision = "revision-1",
+                replacementPinVerified = true
+            )
+        )
+    }
+
+    @Test
+    fun replacingAJudgeRequiresVerifiedPinAndAssignmentRevision() {
+        val service = base().seat(ServiceRole.CENTER, center, at = "t0")
+        assertThrows(IllegalArgumentException::class.java) {
+            service.replace(
+                ServiceRole.CENTER,
+                center.associationId,
+                reliefCorner,
+                assignmentRevision = "revision-1",
+                replacementPinVerified = false
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            service.replace(
+                ServiceRole.CENTER,
+                center.associationId,
+                reliefCorner,
+                assignmentRevision = "",
+                replacementPinVerified = true
+            )
+        }
     }
 
     @Test
@@ -77,7 +120,14 @@ class RingPhaseServiceTest {
             .seat(ServiceRole.CENTER, center, at = "t0")
             .seat(ServiceRole.CORNER, corner1, at = "t1")
             .seat(ServiceRole.SCOREKEEPER, corner2, at = "t2")
-            .replace(ServiceRole.CORNER, "TSD-201", reliefCorner, at = "t3")
+            .replace(
+                ServiceRole.CORNER,
+                "TSD-201",
+                reliefCorner,
+                assignmentRevision = "revision-1",
+                replacementPinVerified = true,
+                at = "t3"
+            )
             .swapRole("TSD-203", ServiceRole.TIMEKEEPER, at = "t4")
         val parsed = parseRingPhaseService(serializeRingPhaseService(service))
         assertEquals(service, parsed)
@@ -87,7 +137,14 @@ class RingPhaseServiceTest {
     fun ringPhasePacketCombinesDivisionHistoriesWithoutChangingTheirAnchors() {
         val first = base().copy(groupAnchor = "20")
             .seat(ServiceRole.CENTER, center, at = "t0")
-            .replace(ServiceRole.CENTER, center.associationId, reliefCorner, at = "t1")
+            .replace(
+                ServiceRole.CENTER,
+                center.associationId,
+                reliefCorner,
+                assignmentRevision = "revision-1",
+                replacementPinVerified = true,
+                at = "t1"
+            )
         val second = base().copy(groupAnchor = "21")
             .seat(ServiceRole.TIMEKEEPER, corner1, at = "t2")
         val packet = buildRingPhaseServicePacket(
