@@ -28,8 +28,11 @@ import java.net.URL
 import java.time.Instant
 import android.util.Log
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Box
@@ -361,6 +364,11 @@ internal fun CheckInScreen(
     var isDownloadingUpdate by remember { mutableStateOf(false) }
     var updateDownloadError by remember { mutableStateOf("") }
     var showExitConfirmationDialog by remember { mutableStateOf(false) }
+    var showDivisionQrScanner by remember { mutableStateOf(false) }
+    var showStoredDivisions by remember { mutableStateOf(false) }
+    var showJudgeServiceDialog by remember { mutableStateOf(false) }
+    var storedDivisionRecords by remember { mutableStateOf(emptyList<DivisionRecord>()) }
+    var currentService by remember { mutableStateOf<RingPhaseService?>(null) }
 
     val weaponsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
         val lockedWeaponsIds = phaseEntrants[CompetitionType.WEAPONS]
@@ -653,6 +661,89 @@ internal fun CheckInScreen(
             stored.effectiveDivisionName()
         )
         remoteStatus = "Recovered $divisionLabel after restart. Reconnect Ring to resume server updates."
+    }
+
+    fun refreshStoredDivisions() {
+        storedDivisionRecords = divisionStore.listDivisions()
+    }
+
+    fun loadStoredDivision(anchor: String) {
+        val stored = divisionStore.loadDivision(anchor) ?: run {
+            remoteStatus = "That division could not be opened."
+            return
+        }
+        applyLoadedGroup(stored, persist = false)
+        divisionStore.loadSession(anchor)?.let { restoreDivisionSession(parseDivisionSession(it)) }
+        activeDivisionAnchor = anchor
+        divisionStore.setActiveAnchor(anchor)
+        currentService = divisionStore.loadService(anchor)?.let { parseRingPhaseService(it) }
+        showStoredDivisions = false
+        val divisionLabel = formatDivisionDisplayLabel(
+            stored.effectiveDivisionNumber(),
+            stored.effectiveDivisionName()
+        )
+        remoteStatus = "Opened stored $divisionLabel."
+    }
+
+    fun loadDivisionFromQr(scannedText: String) {
+        val content = try {
+            decodeDivisionQrPayload(scannedText)
+        } catch (error: DivisionQrException) {
+            remoteStatus = error.message ?: "Invalid division QR code."
+            return
+        }
+        applyLoadedGroup(content.group, persist = true, source = "qr")
+        currentService = null
+        refreshStoredDivisions()
+        val divisionLabel = formatDivisionDisplayLabel(
+            content.group.effectiveDivisionNumber(),
+            content.group.effectiveDivisionName()
+        )
+        remoteStatus = "Loaded $divisionLabel from QR code."
+    }
+
+    suspend fun loadDivisionsFromRingPackage() {
+        val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() }
+            ?: selectedLaunchRingId.takeIf { it.isNotBlank() }
+            ?: currentRingId.takeIf { it.isNotBlank() }
+        if (ringId.isNullOrBlank()) {
+            remoteStatus = "Authorize a ring before loading its divisions."
+            return
+        }
+        val server = TabletAuthorization.server() ?: serverBaseUrl
+        val url = "${server.trimEnd('/')}/api/rings/$ringId/division-package"
+        val result = withContext(Dispatchers.IO) { fetchJsonObject(url) }
+        val root = result.root
+        if (root == null) {
+            remoteStatus = result.errorMessage ?: "Unable to load divisions for this ring."
+            return
+        }
+        val content = try {
+            parseDivisionPackage(root)
+        } catch (_: Exception) {
+            remoteStatus = "The server returned an unexpected division package."
+            return
+        }
+        if (content.groups.isEmpty()) {
+            remoteStatus = "No divisions are assigned to this ring yet."
+            return
+        }
+        var stored = 0
+        content.groups.forEach { group ->
+            divisionStore.saveDivision(group, "network-package")
+            stored++
+        }
+        refreshStoredDivisions()
+        remoteStatus = "Stored $stored division${if (stored == 1) "" else "s"} for this ring. Open one to begin."
+        showStoredDivisions = true
+    }
+
+    fun persistCurrentService(service: RingPhaseService) {
+        currentService = service
+        val anchor = activeDivisionAnchor
+        if (anchor.isNotBlank()) {
+            divisionStore.saveService(anchor, serializeRingPhaseService(service))
+        }
     }
 
     fun moveToScreen(nextScreen: CompetitionScreen, resetControlBoardPhase: Boolean = false) {
@@ -1000,6 +1091,52 @@ internal fun CheckInScreen(
         }
     }
 
+    val divisionQrScanner = rememberLauncherForActivityResult(ScanContract()) { result ->
+        showDivisionQrScanner = false
+        if (result.contents == null) {
+            remoteStatus = "Division scan cancelled."
+        } else {
+            loadDivisionFromQr(result.contents)
+        }
+    }
+    LaunchedEffect(showDivisionQrScanner) {
+        if (showDivisionQrScanner) {
+            divisionQrScanner.launch(
+                ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    .setPrompt("Scan a division QR code").setBeepEnabled(false).setOrientationLocked(false)
+            )
+        }
+    }
+
+    if (showStoredDivisions) {
+        StoredDivisionsDialog(
+            records = storedDivisionRecords,
+            activeAnchor = activeDivisionAnchor,
+            onOpen = { loadStoredDivision(it) },
+            onScanQr = {
+                showStoredDivisions = false
+                showDivisionQrScanner = true
+            },
+            onLoadFromRing = {
+                showStoredDivisions = false
+                screenScope.launch { loadDivisionsFromRingPackage() }
+            },
+            onDismiss = { showStoredDivisions = false }
+        )
+    }
+
+    if (showJudgeServiceDialog) {
+        JudgeServiceDialog(
+            service = currentService ?: RingPhaseService(
+                ringId = currentRingId,
+                phase = controlBoardPhase,
+                groupAnchor = activeDivisionAnchor
+            ),
+            onUpdate = { persistCurrentService(it) },
+            onDismiss = { showJudgeServiceDialog = false }
+        )
+    }
+
     if (showRingPairing) {
         RingPairingDialog(
             expectedRingId = currentRingId.takeIf { currentGroupBanner.isLoaded },
@@ -1018,6 +1155,11 @@ internal fun CheckInScreen(
 
     LaunchedEffect(Unit) {
         recoverStoredDivision()
+        refreshStoredDivisions()
+        if (activeDivisionAnchor.isNotBlank()) {
+            currentService = withContext(Dispatchers.IO) { divisionStore.loadService(activeDivisionAnchor) }
+                ?.let { parseRingPhaseService(it) }
+        }
         if (TabletAuthorization.server() != null) reconnectCurrentRing()
         else refreshLaunchRingOptions()
     }
@@ -1677,6 +1819,12 @@ internal fun CheckInScreen(
             onSelectRing = { selectedLaunchRingId = it },
             onConnectSelectedRing = { connectSelectedRing() },
             onScanRing = { showRingPairing = true },
+            onScanDivisionQr = { showDivisionQrScanner = true },
+            onOpenStoredDivisions = {
+                refreshStoredDivisions()
+                showStoredDivisions = true
+            },
+            storedDivisionCount = storedDivisionRecords.size,
             onEditServer = { showServerConfigDialog = true },
             onExit = { requestExitApp() }
         )
@@ -1714,6 +1862,7 @@ internal fun CheckInScreen(
                                 moveToScreen(CompetitionScreen.HYUNGS_SCORING)
                             }
                         },
+                        onOpenJudgeService = { showJudgeServiceDialog = true },
                         entrantsSummaryText = entrantsSummaryText,
                         ringAssignment = currentRingAssignment,
                         dense = true,
@@ -1799,6 +1948,7 @@ internal fun CheckInScreen(
                                 moveToScreen(CompetitionScreen.HYUNGS_SCORING)
                             }
                         },
+                        onOpenJudgeService = { showJudgeServiceDialog = true },
                         entrantsSummaryText = entrantsSummaryText,
                         ringAssignment = currentRingAssignment,
                         dense = true,
@@ -1886,6 +2036,7 @@ internal fun CheckInScreen(
                                 moveToScreen(CompetitionScreen.HYUNGS_SCORING)
                             }
                         },
+                        onOpenJudgeService = { showJudgeServiceDialog = true },
                         entrantsSummaryText = entrantsSummaryText,
                         ringAssignment = currentRingAssignment,
                         dense = denseCheckInLayout,
@@ -1995,6 +2146,7 @@ private fun CheckInHeaderCard(
     onConnectRing: () -> Unit,
     nextCompetitionButtonLabel: String?,
     onOpenNextCompetition: () -> Unit,
+    onOpenJudgeService: (() -> Unit)? = null,
     entrantsSummaryText: String,
     dense: Boolean,
     modifier: Modifier = Modifier
@@ -2130,6 +2282,16 @@ private fun CheckInHeaderCard(
                             Text(nextCompetitionButtonLabel, fontSize = actionTextSize)
                         }
                     }
+                    if (onOpenJudgeService != null) {
+                        OutlinedButton(
+                            onClick = onOpenJudgeService,
+                            enabled = true,
+                            contentPadding = actionPadding,
+                            modifier = Modifier.height(if (dense) 34.dp else 40.dp)
+                        ) {
+                            Text("Judge Service", fontSize = actionTextSize)
+                        }
+                    }
                 }
             }
         }
@@ -2148,6 +2310,9 @@ private fun LaunchScreenPanel(
     onSelectRing: (String) -> Unit,
     onConnectSelectedRing: () -> Unit,
     onScanRing: () -> Unit,
+    onScanDivisionQr: () -> Unit,
+    onOpenStoredDivisions: () -> Unit,
+    storedDivisionCount: Int,
     onEditServer: () -> Unit,
     onExit: () -> Unit
 ) {
@@ -2210,6 +2375,14 @@ private fun LaunchScreenPanel(
             ) {
                 Button(onClick = onScanRing, modifier = Modifier.fillMaxWidth()) {
                     Text("Scan daily ring QR code")
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onScanDivisionQr, modifier = Modifier.weight(1f)) {
+                        Text("Scan division QR")
+                    }
+                    OutlinedButton(onClick = onOpenStoredDivisions, modifier = Modifier.weight(1f)) {
+                        Text("Stored divisions ($storedDivisionCount)")
+                    }
                 }
                 Text(
                     text = when {
@@ -2325,6 +2498,207 @@ private fun LaunchScreenPanel(
             }
         }
     }
+}
+
+@Composable
+private fun StoredDivisionsDialog(
+    records: List<DivisionRecord>,
+    activeAnchor: String,
+    onOpen: (String) -> Unit,
+    onScanQr: () -> Unit,
+    onLoadFromRing: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Divisions on this tablet", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (records.isEmpty()) {
+                    Text("No divisions are stored yet. Scan a division QR code or load this ring's divisions from the server.")
+                } else {
+                    records.forEach { record ->
+                        val label = if (record.groupDivisionNumber != null) {
+                            "Division ${record.groupDivisionNumber}"
+                        } else {
+                            record.name.ifBlank { record.anchor }
+                        }
+                        val statusLabel = when (record.status) {
+                            DivisionRecordStatus.LOADED -> "Loaded"
+                            DivisionRecordStatus.IN_PROGRESS -> "In progress"
+                            DivisionRecordStatus.COMPLETED -> "Completed"
+                            DivisionRecordStatus.SUBMITTED -> "Submitted"
+                        }
+                        OutlinedButton(
+                            onClick = { onOpen(record.anchor) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = if (record.anchor == activeAnchor) "$label (open)" else label,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "${record.name.ifBlank { "Division" }} - ${record.competitorCount} competitors - $statusLabel",
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onScanQr, modifier = Modifier.weight(1f)) {
+                        Text("Scan division QR")
+                    }
+                    OutlinedButton(onClick = onLoadFromRing, modifier = Modifier.weight(1f)) {
+                        Text("Load ring divisions")
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
+}
+
+@Composable
+private fun JudgeServiceDialog(
+    service: RingPhaseService,
+    onUpdate: (RingPhaseService) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var working by remember { mutableStateOf(service) }
+    var selectedRole by remember { mutableStateOf(ServiceRole.CENTER) }
+    var associationId by remember { mutableStateOf("") }
+    var judgeName by remember { mutableStateOf("") }
+    var judgeRank by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    fun commit(next: RingPhaseService) {
+        working = next
+        onUpdate(next)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Judge service - ${working.phase.ifBlank { "phase" }}", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Current lineup", fontWeight = FontWeight.SemiBold)
+                if (working.seats.values.all { it.isEmpty() }) {
+                    Text("No judges recorded yet.", fontSize = 13.sp)
+                } else {
+                    ServiceRole.entries.forEach { role ->
+                        val judges = working.seats[role].orEmpty()
+                        if (judges.isNotEmpty()) {
+                            Text(role.wire.replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                            judges.forEach { judge ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "${judge.name.ifBlank { "Judge" }} (${judge.associationId}) ${judge.rank}".trim(),
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    TextButton(onClick = { commit(working.unseat(judge.associationId)) }) {
+                                        Text("Remove")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider()
+                Text("Add or replace", fontWeight = FontWeight.SemiBold)
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    ServiceRole.entries.forEach { role ->
+                        val selected = role == selectedRole
+                        OutlinedButton(
+                            onClick = { selectedRole = role },
+                            colors = if (selected) {
+                                ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                            } else {
+                                ButtonDefaults.outlinedButtonColors()
+                            }
+                        ) {
+                            Text(role.wire.replaceFirstChar { it.uppercase() }, fontSize = 12.sp)
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = associationId,
+                    onValueChange = { associationId = it.trim() },
+                    label = { Text("Association ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = judgeName,
+                    onValueChange = { judgeName = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = judgeRank,
+                    onValueChange = { judgeRank = it },
+                    label = { Text("Rank (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                message?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            if (associationId.isBlank()) {
+                                message = "Association ID is required."
+                                return@Button
+                            }
+                            val judge = ServiceJudge(associationId, judgeName.trim(), judgeRank.trim())
+                            val existing = working.seats[selectedRole].orEmpty()
+                            commit(
+                                if (existing.isNotEmpty()) {
+                                    working.replace(selectedRole, existing.first().associationId, judge)
+                                } else {
+                                    working.seat(selectedRole, judge)
+                                }
+                            )
+                            associationId = ""; judgeName = ""; judgeRank = ""; message = null
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Seat / Replace") }
+                    OutlinedButton(
+                        onClick = {
+                            if (associationId.isBlank()) {
+                                message = "Association ID is required."
+                                return@OutlinedButton
+                            }
+                            if (working.roleOf(associationId) == null) {
+                                message = "That judge is not seated yet; seat them first."
+                                return@OutlinedButton
+                            }
+                            commit(working.swapRole(associationId, selectedRole))
+                            associationId = ""; judgeName = ""; judgeRank = ""; message = null
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Swap role") }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } }
+    )
 }
 
 @Composable

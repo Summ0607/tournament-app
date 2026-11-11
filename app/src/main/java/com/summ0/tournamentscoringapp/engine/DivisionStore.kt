@@ -176,6 +176,22 @@ class DivisionStore(baseDir: File) {
         }
     }
 
+    fun saveService(anchor: String, service: JSONObject): Boolean {
+        if (record(anchor) == null) return false
+        writeAtomic(serviceFile(anchor), service.toString(2))
+        return true
+    }
+
+    fun loadService(anchor: String): JSONObject? {
+        val file = serviceFile(anchor)
+        if (!file.isFile) return null
+        return try {
+            JSONObject(file.readText())
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun markCompleted(anchor: String) {
         touch(anchor) { it.copy(status = DivisionRecordStatus.COMPLETED) }
     }
@@ -204,7 +220,11 @@ class DivisionStore(baseDir: File) {
 
     private fun sessionFile(anchor: String) = File(File(rootDir, anchor), "session.json")
 
+    private fun serviceFile(anchor: String) = File(File(rootDir, anchor), "service.json")
+
     fun hasSession(anchor: String): Boolean = sessionFile(anchor).isFile
+
+    fun hasService(anchor: String): Boolean = serviceFile(anchor).isFile
 
     private fun touch(anchor: String, transform: (DivisionRecord) -> DivisionRecord) {
         updateIndex { index ->

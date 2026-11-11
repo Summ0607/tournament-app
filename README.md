@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.47 (48)**. The installed version is shown beneath
+This checkpoint is version **1.48 (49)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.47 (48)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.48 (49)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -123,3 +123,35 @@ later stages (multi-division QR loading and USB transfer).
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionStoreTest`,
 `DivisionSessionTest`).
+
+### Division QR loading and network packages
+
+Divisions reach the tablet two ways, both producing an identical loaded division:
+
+- **Self-contained QR codes** — from the launch screen, **Scan division QR**
+  decodes a `tournament-division-qr` code printed in advance by the server. The
+  payload is raw-deflate + base64url with a SHA-256 integrity prefix, matching
+  the server encoder; a tampered or foreign code is rejected. No network is
+  required, so divisions can be loaded fully offline.
+- **Network package** — **Stored divisions → Load ring divisions** fetches
+  `GET /api/rings/{ringId}/division-package` and stores the ring's current and
+  queued divisions at once.
+
+Both paths cap a division at 12 competitors and persist through the durable
+store, so multiple divisions live on one tablet. **Stored divisions** lists them
+with status and lets the operator open (and resume) any one; opening restores its
+saved session.
+
+### Judge service recording
+
+**Judge Service** on the check-in header records who is actually serving the
+loaded division: center, corner, SK/TK and arbitrator seats, each judge
+identified by Association ID. The screen supports seating, replacing a seated
+judge, swapping a judge's role, and removing a judge, keeping a timestamped
+history of every `seated`/`replaced`/`swapped` change alongside the final
+lineup. The record is stored per division at `{division}/service.json` and is
+recovered with the division after a restart. Transfer to the server as a
+separate per-ring-phase service packet follows in a later stage.
+
+Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionPackageTest`,
+`RingPhaseServiceTest`).

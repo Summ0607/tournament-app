@@ -116,6 +116,23 @@ class DivisionStoreTest {
     }
 
     @Test
+    fun serviceRecordsPersistPerDivisionAndSurviveRestart() {
+        val store = DivisionStore(folder.root)
+        store.saveDivision(sampleGroup(20), "qr")
+        assertFalse(store.hasService("20"))
+        assertFalse(store.saveService("99", JSONObject()))
+
+        val service = JSONObject().put("schemaVersion", 1).put("phase", "P1")
+        assertTrue(store.saveService("20", service))
+        assertTrue(store.hasService("20"))
+
+        val reopened = DivisionStore(folder.root)
+        assertEquals("P1", reopened.loadService("20")?.optString("phase"))
+        // A service record never changes the division's lifecycle status.
+        assertEquals(DivisionRecordStatus.LOADED, reopened.record("20")?.status)
+    }
+
+    @Test
     fun removingADivisionClearsItsFilesAndActiveAnchor() {
         val store = DivisionStore(folder.root)
         store.saveDivision(sampleGroup(20), "network")
