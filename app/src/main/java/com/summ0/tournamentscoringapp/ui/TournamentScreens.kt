@@ -84,6 +84,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.conflate
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -273,6 +275,8 @@ internal fun CheckInScreen(
     val appContext = context.applicationContext
     val activity = context.findActivity()
     val mainViewModel = remember(appContext) { MainViewModel(appContext) }
+    val divisionStore = remember(appContext) { DivisionStore(appContext.filesDir) }
+    var activeDivisionAnchor by rememberSaveable { mutableStateOf("") }
     val initialServerConnectionConfig = remember(appContext) { mainViewModel.loadServerConnectionConfig() }
     val competitorsState = rememberSaveable(stateSaver = competitorListSaver) { mutableStateOf(emptyList<Competitor>()) }
     val competitors: List<Competitor> = competitorsState.value
@@ -509,7 +513,7 @@ internal fun CheckInScreen(
         )
     }
 
-    fun applyLoadedGroup(group: RemoteGroup) {
+    fun applyLoadedGroup(group: RemoteGroup, persist: Boolean = true, source: String = "network") {
         resetCompetitionState()
         val divisionNumber = group.effectiveDivisionNumber()
         val divisionName = group.effectiveDivisionName()
@@ -526,6 +530,18 @@ internal fun CheckInScreen(
             groupDivisionName = divisionName
         )
         resetControlBoardPhaseHistory("setup")
+        if (persist) {
+            val record = divisionStore.saveDivision(group, source)
+            activeDivisionAnchor = record.anchor
+            divisionStore.setActiveAnchor(record.anchor)
+        }
+    }
+
+    fun clearActiveDivisionAnchor() {
+        if (activeDivisionAnchor.isNotBlank()) {
+            activeDivisionAnchor = ""
+            divisionStore.setActiveAnchor(null)
+        }
     }
 
     fun clearLoadedGroup() {
@@ -534,6 +550,7 @@ internal fun CheckInScreen(
         competitorsState.value = emptyList()
         currentGroupBannerState.value = GroupBanner()
         resetControlBoardPhaseHistory("setup")
+        clearActiveDivisionAnchor()
     }
 
     fun markUnassignedAssignment() {
@@ -544,6 +561,7 @@ internal fun CheckInScreen(
         resetControlBoardPhaseHistory("setup")
         currentRingAssignment = null
         remoteStatus = "Unassigned"
+        clearActiveDivisionAnchor()
     }
 
     fun markPendingAssignment() {
@@ -553,6 +571,88 @@ internal fun CheckInScreen(
         currentGroupBannerState.value = GroupBanner()
         resetControlBoardPhaseHistory("setup")
         remoteStatus = "Pending Assignment"
+        clearActiveDivisionAnchor()
+    }
+
+    fun buildDivisionSessionSnapshot(): DivisionSession {
+        return DivisionSession(
+            competitors = competitorsState.value,
+            lockedPhases = lockedPhases,
+            phaseEntrants = phaseEntrants,
+            useOnlyThreeJudges = useOnlyThreeJudges,
+            currentScreenName = currentScreenState.value.name,
+            controlBoardPhase = controlBoardPhaseState.value,
+            controlBoardPhaseStartedAt = controlBoardPhaseStartedAt,
+            phaseHistory = controlBoardPhaseHistory.toList(),
+            weaponsScores = weaponsScoresByCompetitor.toMap(),
+            hyungsScores = hyungsScoresByCompetitor.toMap(),
+            weaponsTieBreakScores = weaponsTieBreakScoresByCompetitor.toMap(),
+            hyungsTieBreakScores = hyungsTieBreakScoresByCompetitor.toMap(),
+            weaponsJudgeChoices = weaponsJudgeChoicesByGroup.toMap(),
+            hyungsJudgeChoices = hyungsJudgeChoicesByGroup.toMap(),
+            weaponsFinalize = weaponsFinalizeState,
+            hyungsFinalize = hyungsFinalizeState,
+            pendingTieBreak = pendingTieBreak,
+            sparringWinnerIds = sparringWinners.entries.associate { (round, bouts) ->
+                round to bouts.mapValues { entry -> entry.value.id }
+            },
+            sparringBoutProgress = sparringBoutProgress.toMap()
+        )
+    }
+
+    fun restoreDivisionSession(session: DivisionSession) {
+        if (session.competitors.isNotEmpty()) {
+            competitorsState.value = session.competitors
+        }
+        lockedPhases = session.lockedPhases
+        phaseEntrants = session.phaseEntrants
+        useOnlyThreeJudges = session.useOnlyThreeJudges
+        weaponsScoresByCompetitor.clear()
+        weaponsScoresByCompetitor.putAll(session.weaponsScores)
+        hyungsScoresByCompetitor.clear()
+        hyungsScoresByCompetitor.putAll(session.hyungsScores)
+        weaponsTieBreakScoresByCompetitor.clear()
+        weaponsTieBreakScoresByCompetitor.putAll(session.weaponsTieBreakScores)
+        hyungsTieBreakScoresByCompetitor.clear()
+        hyungsTieBreakScoresByCompetitor.putAll(session.hyungsTieBreakScores)
+        weaponsJudgeChoicesByGroup.clear()
+        weaponsJudgeChoicesByGroup.putAll(session.weaponsJudgeChoices)
+        hyungsJudgeChoicesByGroup.clear()
+        hyungsJudgeChoicesByGroup.putAll(session.hyungsJudgeChoices)
+        weaponsFinalizeState = session.weaponsFinalize
+        hyungsFinalizeState = session.hyungsFinalize
+        pendingTieBreak = session.pendingTieBreak
+        val competitorsById = competitorsState.value.associateBy { it.id }
+        sparringWinners.clear()
+        session.sparringWinnerIds.forEach { (round, bouts) ->
+            val resolved = bouts.entries.mapNotNull { (bout, competitorId) ->
+                competitorsById[competitorId]?.let { bout to it }
+            }.toMap()
+            if (resolved.isNotEmpty()) sparringWinners[round] = resolved
+        }
+        sparringBoutProgress.clear()
+        sparringBoutProgress.putAll(session.sparringBoutProgress)
+        controlBoardPhaseHistory.clear()
+        controlBoardPhaseHistory.addAll(session.phaseHistory)
+        controlBoardPhaseState.value = session.controlBoardPhase.ifBlank { "setup" }
+        controlBoardPhaseStartedAt = session.controlBoardPhaseStartedAt.ifBlank { Instant.now().toString() }
+        currentScreenState.value = runCatching { CompetitionScreen.valueOf(session.currentScreenName) }
+            .getOrDefault(CompetitionScreen.CHECK_IN)
+    }
+
+    suspend fun recoverStoredDivision() {
+        if (currentGroupBanner.isLoaded) return
+        val anchor = withContext(Dispatchers.IO) { divisionStore.activeAnchor() } ?: return
+        val stored = withContext(Dispatchers.IO) { divisionStore.loadDivision(anchor) } ?: return
+        val sessionJson = withContext(Dispatchers.IO) { divisionStore.loadSession(anchor) }
+        applyLoadedGroup(stored, persist = false)
+        sessionJson?.let { restoreDivisionSession(parseDivisionSession(it)) }
+        activeDivisionAnchor = anchor
+        val divisionLabel = formatDivisionDisplayLabel(
+            stored.effectiveDivisionNumber(),
+            stored.effectiveDivisionName()
+        )
+        remoteStatus = "Recovered $divisionLabel after restart. Reconnect Ring to resume server updates."
     }
 
     fun moveToScreen(nextScreen: CompetitionScreen, resetControlBoardPhase: Boolean = false) {
@@ -690,7 +790,9 @@ internal fun CheckInScreen(
                 return@launch
             }
             val hadAssignedRing = currentRingId.isNotBlank()
-            val preserveLoadedGroupOnReconnect = hadAssignedRing && currentGroupBanner.isLoaded
+            // A loaded division (including one recovered after restart) is preserved; the
+            // server replaces it only when a different division is assigned to the ring.
+            val preserveLoadedGroupOnReconnect = currentGroupBanner.isLoaded
             val requestGroupUrl = "${serverBaseUrl.trimEnd('/')}/api/rings/$selectedRingId/request-group"
             isLoadingGroup = true
             remoteStatus = "Connecting ring..."
@@ -765,6 +867,10 @@ internal fun CheckInScreen(
             }
 
             isCompletingGroup = true
+            val completedDivisionAnchor = activeDivisionAnchor
+            if (completedDivisionAnchor.isNotBlank()) {
+                divisionStore.markCompleted(completedDivisionAnchor)
+            }
             remoteStatus = "Loading next group: building packet..."
             val completionTimestamp = Instant.now().toString()
             appendCurrentPhaseToHistory(completionTimestamp)
@@ -787,6 +893,9 @@ internal fun CheckInScreen(
                 is DivisionResultSubmissionResult.Accepted -> {
                     remoteStatus = "Loading next group: saving results..."
                     markRingConnectionHealthy()
+                    if (completedDivisionAnchor.isNotBlank()) {
+                        divisionStore.markSubmitted(completedDivisionAnchor, submissionResult.response.submissionId)
+                    }
                     if (snapshotBytes != null && snapshotMimeType != null) {
                         val receiptPacket = buildFrozenCompletionSubmissionPayload(
                             serializeDivisionResultPacket(DivisionResultPacketBuilder.build(request)),
@@ -908,8 +1017,30 @@ internal fun CheckInScreen(
     }
 
     LaunchedEffect(Unit) {
+        recoverStoredDivision()
         if (TabletAuthorization.server() != null) reconnectCurrentRing()
         else refreshLaunchRingOptions()
+    }
+
+    // Durably snapshot the active division's session whenever its state changes.
+    LaunchedEffect(divisionStore) {
+        snapshotFlow {
+            val anchor = activeDivisionAnchor
+            if (anchor.isBlank() || !currentGroupBanner.isLoaded) null
+            else anchor to buildDivisionSessionSnapshot()
+        }
+            .conflate()
+            .collect { entry ->
+                if (entry != null) {
+                    val (anchor, session) = entry
+                    withContext(Dispatchers.IO) {
+                        if (!session.isPristine() || divisionStore.hasSession(anchor)) {
+                            divisionStore.saveSession(anchor, serializeDivisionSession(session))
+                        }
+                    }
+                    delay(500L)
+                }
+            }
     }
 
     LaunchedEffect(showServerConfigDialog, launchServerReachable) {

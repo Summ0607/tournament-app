@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.46 (47)**. The installed version is shown beneath
+This checkpoint is version **1.47 (48)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.46 (47)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.47 (48)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -94,3 +94,32 @@ Fixed-IP QR scanning and authorization have been verified on the physical tablet
 QR codes default to the fixed IP while tablet DNS resolution is unavailable.
 Replacement and score-submission acceptance checks remain part of tablet testing.
 The server now uses HTTPS-only listeners; no HTTP fallback is available.
+
+### Durable division storage and restart recovery
+
+Loaded divisions are stored durably under the app's private storage at
+`filesDir/divisions/`:
+
+- `index.json` — catalog of every stored division with its status
+  (`LOADED` → `IN_PROGRESS` → `COMPLETED` → `SUBMITTED`), source, timestamps,
+  and the active division anchor.
+- `{division}/division.json` — the immutable division as loaded (network now,
+  QR in a later stage).
+- `{division}/session.json` — the latest check-in/scoring snapshot: check-in
+  states, entries, locked phases, weapons/hyungs scores and tie-breaks, judge
+  choices, placements, pending tie-breaks, sparring winners and bout progress,
+  current screen, and phase history.
+
+Every write is atomic (temp file + rename), so a crash or power loss never
+leaves a partially written document. Session snapshots are written automatically
+whenever scoring state changes; untouched divisions stay `LOADED`. On startup the
+app recovers the active division and its session before contacting the server,
+and reconnecting a ring preserves the recovered division unless the server
+assigns a different one. An in-flight sparring bout timer is not persisted:
+reopen the bout after a restart; recorded points and warnings are retained.
+Completing a division marks it `COMPLETED`, and a server acknowledgment marks it
+`SUBMITTED` with the accepted submission id. Stored divisions are retained for
+later stages (multi-division QR loading and USB transfer).
+
+Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionStoreTest`,
+`DivisionSessionTest`).
