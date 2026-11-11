@@ -260,6 +260,22 @@ class DivisionStore(baseDir: File) {
         return !file.exists() || file.delete()
     }
 
+    fun loadJudgeAttendance(plan: JSONObject): RingPhaseJudgeAttendance? {
+        val file = judgeAttendanceFile(plan)
+        if (!file.isFile) return null
+        return try {
+            parseJudgeAttendance(JSONObject(file.readText()), plan)
+        } catch (error: Exception) {
+            throw IOException("Unable to recover saved judge attendance.", error)
+        }
+    }
+
+    fun saveJudgeAttendance(plan: JSONObject, attendance: RingPhaseJudgeAttendance): Boolean {
+        val validated = parseJudgeAttendance(serializeJudgeAttendance(attendance), plan)
+        writeAtomic(judgeAttendanceFile(plan), serializeJudgeAttendance(validated).toString(2))
+        return true
+    }
+
     fun prepareServicePacket(ringId: String, phase: String, eventName: String): StoredServicePacket {
         require(phase == "P1" || phase == "P2") { "Select P1 or P2 for service transfer." }
         require(eventName.isNotBlank()) { "Pair this tablet with a tournament before transferring service." }
@@ -369,6 +385,24 @@ class DivisionStore(baseDir: File) {
             .digest(key.toByteArray(Charsets.UTF_8))
             .joinToString("") { "%02x".format(it) }
         return File(judgePlansDir, "$digest.json")
+    }
+
+    private fun judgeAttendanceFile(plan: JSONObject): File {
+        val eventName = plan.optString("eventName")
+        val ringId = plan.optString("ringId")
+        val phase = plan.optString("phase")
+        val revision = plan.optString("assignmentRevision")
+        require(eventName.isNotBlank() && ringId.isNotBlank() &&
+            (phase == "P1" || phase == "P2") && revision.isNotBlank()) {
+            "A revisioned event/ring/phase plan is required for attendance."
+        }
+        val key = "$eventName\u0000$ringId\u0000$phase\u0000$revision"
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(key.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val directory = File(judgePlansDir, "attendance")
+        directory.mkdirs()
+        return File(directory, "$digest.json")
     }
 
     fun hasSession(anchor: String): Boolean = sessionFile(anchor).isFile

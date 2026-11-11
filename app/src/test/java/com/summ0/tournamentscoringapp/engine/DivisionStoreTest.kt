@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -107,6 +108,48 @@ class DivisionStoreTest {
         assertNull(reopened.loadJudgePlan("Event B", "ring-a-1", "P1"))
         assertTrue(reopened.deleteJudgePlan("Event A", "ring-a-1", "P1"))
         assertNull(reopened.loadJudgePlan("Event A", "ring-a-1", "P1"))
+    }
+
+    @Test
+    fun ringPhaseAttendanceSurvivesRestartAndIsScopedToPlanRevision() {
+        val store = DivisionStore(folder.root)
+        store.saveDivision(sampleGroup(20), "network")
+        val plan = JSONObject()
+            .put("type", "tournament-judge-plan")
+            .put("schemaVersion", 1)
+            .put("eventName", "Event A")
+            .put("ringId", "ring-a-1")
+            .put("phase", "P1")
+            .put("assignmentRevision", "revision-1")
+            .put("sourceRevision", "source-1")
+            .put("assigned", true)
+            .put("positions", JSONObject()
+                .put("center", org.json.JSONArray()
+                    .put(JSONObject().put("associationId", "ID1").put("name", "Center Judge")))
+                .put("corner", org.json.JSONArray()
+                    .put(JSONObject().put("associationId", "ID2").put("name", "Corner Judge"))))
+        val initial = newJudgeAttendance(plan)
+        assertTrue(initial.officials.all { it.status == JudgeAttendanceStatus.UNCONFIRMED })
+
+        val updated = updateJudgeAttendance(initial, "id1", JudgeAttendanceStatus.PRESENT, "2026-11-11T12:00:00Z")
+            .let { updateJudgeAttendance(it, "ID2", JudgeAttendanceStatus.ABSENT, "2026-11-11T12:01:00Z") }
+        assertTrue(store.saveJudgeAttendance(plan, updated))
+        val reopened = DivisionStore(folder.root).loadJudgeAttendance(plan)
+        assertNotNull(reopened)
+        assertEquals(
+            listOf(JudgeAttendanceStatus.PRESENT, JudgeAttendanceStatus.ABSENT),
+            reopened?.officials?.map { it.status }
+        )
+        assertEquals("2026-11-11T12:00:00Z", reopened?.officials?.first()?.markedAt)
+
+        val revisedPlan = JSONObject(plan.toString()).put("assignmentRevision", "revision-2")
+        assertNull(DivisionStore(folder.root).loadJudgeAttendance(revisedPlan))
+        assertThrows(IllegalArgumentException::class.java) {
+            updateJudgeAttendance(updated, "ID3", JudgeAttendanceStatus.PRESENT)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            store.prepareServicePacket("ring-a-1", "P1", "Event A")
+        }
     }
 
     @Test

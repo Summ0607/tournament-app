@@ -406,6 +406,10 @@ internal fun CheckInScreen(
     var serviceTransferStatus by remember { mutableStateOf("") }
     var isSubmittingService by remember { mutableStateOf(false) }
     var judgePlanSummary by remember { mutableStateOf("") }
+    var currentJudgePlan by remember { mutableStateOf<JSONObject?>(null) }
+    var currentJudgeAttendance by remember { mutableStateOf<RingPhaseJudgeAttendance?>(null) }
+    var judgeAttendanceStatus by remember { mutableStateOf("") }
+    var isSavingJudgeAttendance by remember { mutableStateOf(false) }
     var pendingServicePacketExport by remember { mutableStateOf("") }
     val servicePacketExportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -862,6 +866,45 @@ internal fun CheckInScreen(
         return service
     }
 
+    suspend fun activateJudgePlan(plan: JSONObject, source: String) {
+        currentJudgePlan = plan
+        try {
+            currentJudgeAttendance = withContext(Dispatchers.IO) {
+                divisionStore.loadJudgeAttendance(plan) ?: newJudgeAttendance(plan)
+            }
+            judgeAttendanceStatus = ""
+            judgePlanSummary = formatJudgePlanSummary(plan, source)
+        } catch (error: Exception) {
+            currentJudgeAttendance = null
+            judgeAttendanceStatus = error.message ?: "Unable to recover saved attendance."
+            judgePlanSummary = formatJudgePlanSummary(plan, source)
+        }
+    }
+
+    fun recordJudgeAttendance(associationId: String, status: JudgeAttendanceStatus) {
+        val plan = currentJudgePlan ?: return
+        val attendance = currentJudgeAttendance ?: return
+        if (isSavingJudgeAttendance) return
+        isSavingJudgeAttendance = true
+        judgeAttendanceStatus = "Saving attendance..."
+        screenScope.launch {
+            try {
+                val updated = withContext(Dispatchers.IO) {
+                    val latest = divisionStore.loadJudgeAttendance(plan) ?: attendance
+                    updateJudgeAttendance(latest, associationId, status).also {
+                        divisionStore.saveJudgeAttendance(plan, it)
+                    }
+                }
+                currentJudgeAttendance = updated
+                judgeAttendanceStatus = "Attendance saved on this tablet. It does not record service credit."
+            } catch (error: Exception) {
+                judgeAttendanceStatus = error.message ?: "Unable to save judge attendance."
+            } finally {
+                isSavingJudgeAttendance = false
+            }
+        }
+    }
+
     fun loadJudgePlan(phase: String) {
         val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
         if (ringId.isBlank()) {
@@ -869,12 +912,15 @@ internal fun CheckInScreen(
             return
         }
         val pairedEvent = TabletAuthorization.event()?.takeIf { it.isNotBlank() }
+        currentJudgePlan = null
+        currentJudgeAttendance = null
+        judgeAttendanceStatus = ""
         screenScope.launch {
             val cached = pairedEvent?.let {
                 withContext(Dispatchers.IO) { divisionStore.loadJudgePlan(it, ringId, phase) }
             }
             if (cached != null) {
-                judgePlanSummary = formatJudgePlanSummary(cached, "Saved on this tablet")
+                activateJudgePlan(cached, "Saved on this tablet")
             } else {
                 judgePlanSummary = "Loading saved assignment plan..."
             }
@@ -904,6 +950,8 @@ internal fun CheckInScreen(
                 val removed = withContext(Dispatchers.IO) {
                     divisionStore.deleteJudgePlan(root.optString("eventName"), ringId, phase)
                 }
+                currentJudgePlan = null
+                currentJudgeAttendance = null
                 judgePlanSummary = if (removed) {
                     "No saved assignment exists for $ringId, $phase."
                 } else {
@@ -924,7 +972,7 @@ internal fun CheckInScreen(
                 withContext(Dispatchers.IO) {
                     divisionStore.saveJudgePlan(root.optString("eventName"), ringId, phase, root)
                 }
-                judgePlanSummary = formatJudgePlanSummary(root, "Downloaded and saved on this tablet")
+                activateJudgePlan(root, "Downloaded and saved on this tablet")
             } catch (error: Exception) {
                 judgePlanSummary = error.message ?: "Unable to save the assignment plan on this tablet."
             }
@@ -1410,9 +1458,20 @@ internal fun CheckInScreen(
                 groupAnchor = activeDivisionAnchor
             ),
             onUpdate = { persistCurrentService(it) },
-            onPhaseChange = { selectJudgeServicePhase(it) },
+            onPhaseChange = {
+                selectJudgeServicePhase(it).also { service ->
+                    loadJudgePlan(service.phase)
+                }
+            },
             onLoadPlan = { loadJudgePlan(it) },
             planSummary = judgePlanSummary,
+            judgePlan = currentJudgePlan,
+            attendance = currentJudgeAttendance,
+            attendanceStatus = judgeAttendanceStatus,
+            isSavingAttendance = isSavingJudgeAttendance,
+            onAttendanceChange = { associationId, status ->
+                recordJudgeAttendance(associationId, status)
+            },
             transferStatus = serviceTransferStatus,
             isTransferring = isSubmittingService,
             onSubmit = { submitJudgeServicePacket() },
@@ -2858,6 +2917,11 @@ private fun JudgeServiceDialog(
     onPhaseChange: (String) -> RingPhaseService,
     onLoadPlan: (String) -> Unit,
     planSummary: String,
+    judgePlan: JSONObject?,
+    attendance: RingPhaseJudgeAttendance?,
+    attendanceStatus: String,
+    isSavingAttendance: Boolean,
+    onAttendanceChange: (String, JudgeAttendanceStatus) -> Unit,
     transferStatus: String,
     isTransferring: Boolean,
     onSubmit: () -> Unit,
@@ -2878,6 +2942,12 @@ private fun JudgeServiceDialog(
         onUpdate(next)
     }
 
+    val planMatches = judgePlan?.let {
+        it.optBoolean("assigned") &&
+            it.optString("ringId") == working.ringId &&
+            it.optString("phase") == working.phase
+    } == true
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Judge service - ${working.phase.ifBlank { "phase" }}", fontWeight = FontWeight.Bold) },
@@ -2894,14 +2964,74 @@ private fun JudgeServiceDialog(
                                 working = onPhaseChange(phase)
                                 message = null
                             },
-                            enabled = !isTransferring
+                            enabled = !isTransferring && !isSavingAttendance
                         ) { Text(phase) }
                     }
-                    OutlinedButton(onClick = { onLoadPlan(working.phase) }, enabled = !isTransferring) {
+                    OutlinedButton(
+                        onClick = { onLoadPlan(working.phase) },
+                        enabled = !isTransferring && !isSavingAttendance
+                    ) {
                         Text("Load / refresh saved plan")
                     }
                 }
                 if (planSummary.isNotBlank()) Text(planSummary, fontSize = 12.sp)
+                Text("Planned judge attendance", fontWeight = FontWeight.SemiBold)
+                Text("Attendance is operational only; confirming a judge does not create service experience.", fontSize = 12.sp)
+                if (!planMatches) {
+                    Text("Load the saved plan for ${working.ringId}, ${working.phase} to confirm attendance.", fontSize = 12.sp)
+                } else if (attendance == null) {
+                    Text(attendanceStatus.ifBlank { "Attendance could not be recovered; reload the saved plan." },
+                        color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                } else if (attendance.officials.isEmpty()) {
+                    Text("No judges are assigned to this ring and phase.", fontSize = 13.sp)
+                } else {
+                    listOf("center", "corner", "sktk").forEach { role ->
+                        val officials = attendance.officials.filter { it.assignedRole == role }
+                        if (officials.isNotEmpty()) {
+                            Text(
+                                when (role) {
+                                    "center" -> "Center"
+                                    "corner" -> "Corner"
+                                    else -> "SK/TK"
+                                },
+                                fontWeight = FontWeight.Medium,
+                                fontSize = 13.sp
+                            )
+                            officials.forEach { official ->
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Text(
+                                        "${official.name} (${official.associationId}) · ${official.status.name.lowercase().replaceFirstChar { it.uppercase() }}",
+                                        fontSize = 13.sp
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        OutlinedButton(
+                                            onClick = {
+                                                onAttendanceChange(official.associationId, JudgeAttendanceStatus.PRESENT)
+                                            },
+                                            enabled = !isSavingAttendance,
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Present") }
+                                        OutlinedButton(
+                                            onClick = {
+                                                onAttendanceChange(official.associationId, JudgeAttendanceStatus.ABSENT)
+                                            },
+                                            enabled = !isSavingAttendance,
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Absent") }
+                                        TextButton(
+                                            onClick = {
+                                                onAttendanceChange(official.associationId, JudgeAttendanceStatus.UNCONFIRMED)
+                                            },
+                                            enabled = !isSavingAttendance,
+                                            modifier = Modifier.weight(1f)
+                                        ) { Text("Clear") }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (attendanceStatus.isNotBlank()) Text(attendanceStatus, fontSize = 12.sp)
+                }
                 Text("Current lineup", fontWeight = FontWeight.SemiBold)
                 if (working.seats.values.all { it.isEmpty() }) {
                     Text("No judges recorded yet.", fontSize = 13.sp)
