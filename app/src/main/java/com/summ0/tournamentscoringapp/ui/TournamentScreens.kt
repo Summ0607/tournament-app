@@ -2937,6 +2937,8 @@ private fun JudgeServiceDialog(
     var judgeRank by remember { mutableStateOf("") }
     var replacementTargetId by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
     var replacementPin by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
+    var firstSwapAssociationId by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
+    var secondSwapAssociationId by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
     var message by remember(working.groupAnchor, working.phase) { mutableStateOf<String?>(null) }
     var messageIsError by remember(working.groupAnchor, working.phase) { mutableStateOf(false) }
     var showTransferConfirmation by remember { mutableStateOf(false) }
@@ -2955,6 +2957,25 @@ private fun JudgeServiceDialog(
             it.optString("eventName") == pairedEvent
     } == true
     val replacementPinAvailable = planMatches && hasReplacementPinVerifier(judgePlan)
+    val firstSwapRole = firstSwapAssociationId.takeIf { it.isNotBlank() }?.let(working::roleOf)
+    val secondSwapRole = secondSwapAssociationId.takeIf { it.isNotBlank() }?.let(working::roleOf)
+    val swapPairReady = firstSwapRole != null && secondSwapRole != null &&
+        setOf(firstSwapRole, secondSwapRole) == setOf(ServiceRole.CENTER, ServiceRole.CORNER)
+
+    fun selectSwapJudge(associationId: String) {
+        replacementTargetId = ""
+        replacementPin = ""
+        message = null
+        messageIsError = false
+        if (firstSwapAssociationId.isBlank() || secondSwapAssociationId.isNotBlank()) {
+            firstSwapAssociationId = associationId
+            secondSwapAssociationId = ""
+        } else if (firstSwapAssociationId == associationId) {
+            firstSwapAssociationId = ""
+        } else {
+            secondSwapAssociationId = associationId
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2972,6 +2993,8 @@ private fun JudgeServiceDialog(
                                 working = onPhaseChange(phase)
                                 replacementTargetId = ""
                                 replacementPin = ""
+                                firstSwapAssociationId = ""
+                                secondSwapAssociationId = ""
                                 message = null
                                 messageIsError = false
                             },
@@ -3063,10 +3086,24 @@ private fun JudgeServiceDialog(
                                         modifier = Modifier.weight(1f)
                                     )
                                 TextButton(
+                                    onClick = { selectSwapJudge(judge.associationId) },
+                                    enabled = !isTransferring && !isSavingAttendance
+                                ) {
+                                    Text(
+                                        when (judge.associationId) {
+                                            firstSwapAssociationId -> "Swap 1"
+                                            secondSwapAssociationId -> "Swap 2"
+                                            else -> "Swap"
+                                        }
+                                    )
+                                }
+                                TextButton(
                                     onClick = {
                                         selectedRole = role
                                         replacementTargetId = judge.associationId
                                         replacementPin = ""
+                                        firstSwapAssociationId = ""
+                                        secondSwapAssociationId = ""
                                         message = null
                                         messageIsError = false
                                     },
@@ -3078,6 +3115,11 @@ private fun JudgeServiceDialog(
                                             replacementTargetId = ""
                                             replacementPin = ""
                                         }
+                                        if (firstSwapAssociationId == judge.associationId ||
+                                            secondSwapAssociationId == judge.associationId) {
+                                            firstSwapAssociationId = ""
+                                            secondSwapAssociationId = ""
+                                        }
                                         commit(working.unseat(judge.associationId))
                                     },
                                     enabled = !isTransferring && !isSavingAttendance
@@ -3085,6 +3127,51 @@ private fun JudgeServiceDialog(
                                 }
                             }
                         }
+                    }
+                }
+                if (firstSwapAssociationId.isNotBlank()) {
+                    val firstJudge = working.seats.values.flatten()
+                        .firstOrNull { it.associationId == firstSwapAssociationId }
+                    val secondJudge = working.seats.values.flatten()
+                        .firstOrNull { it.associationId == secondSwapAssociationId }
+                    Text(
+                        if (secondJudge == null) {
+                            "Select one Center and one Corner judge. Both will receive Center service credit; no PIN is required."
+                        } else if (swapPairReady) {
+                            "Swap ${firstJudge?.name ?: firstSwapAssociationId} with ${secondJudge.name}. Both receive Center service credit only."
+                        } else {
+                            "A service-credit swap requires one Center judge and one Corner judge."
+                        },
+                        fontSize = 12.sp,
+                        color = if (secondJudge == null || swapPairReady) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        }
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                commit(
+                                    working.swapRoles(
+                                        firstSwapAssociationId,
+                                        secondSwapAssociationId
+                                    )
+                                )
+                                firstSwapAssociationId = ""
+                                secondSwapAssociationId = ""
+                                message = "Role swap recorded. Both judges receive Center service credit only; no PIN was required."
+                                messageIsError = false
+                            },
+                            enabled = swapPairReady && !isTransferring && !isSavingAttendance,
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Swap roles") }
+                        TextButton(
+                            onClick = {
+                                firstSwapAssociationId = ""
+                                secondSwapAssociationId = ""
+                            }
+                        ) { Text("Clear") }
                     }
                 }
                 HorizontalDivider()
@@ -3100,7 +3187,9 @@ private fun JudgeServiceDialog(
                                 selectedRole = role
                                 replacementTargetId = ""
                                 replacementPin = ""
-                                message = null
+                                    firstSwapAssociationId = ""
+                                    secondSwapAssociationId = ""
+                                    message = null
                                 messageIsError = false
                             },
                             colors = if (selected) {
@@ -3225,6 +3314,11 @@ private fun JudgeServiceDialog(
                                 messageIsError = false
                                 return@Button
                             }
+                            if (firstSwapAssociationId.isNotBlank()) {
+                                message = "Finish or clear the selected role swap before seating another judge."
+                                messageIsError = true
+                                return@Button
+                            }
                             if (working.roleOf(associationId) != null) {
                                 message = "That judge is already seated. Use Swap role if they are serving another role."
                                 messageIsError = true
@@ -3242,25 +3336,6 @@ private fun JudgeServiceDialog(
                         enabled = !isTransferring && !isSavingAttendance,
                         modifier = Modifier.weight(1f)
                     ) { Text(if (replacementTargetId.isBlank()) "Seat judge" else "Replace selected") }
-                    OutlinedButton(
-                        onClick = {
-                            if (associationId.isBlank()) {
-                                message = "Association ID is required."
-                                messageIsError = true
-                                return@OutlinedButton
-                            }
-                            if (working.roleOf(associationId) == null) {
-                                message = "That judge is not seated yet; seat them first."
-                                messageIsError = true
-                                return@OutlinedButton
-                            }
-                            commit(working.swapRole(associationId, selectedRole))
-                            associationId = ""; judgeName = ""; judgeRank = ""; message = null
-                            messageIsError = false
-                        },
-                        enabled = !isTransferring && !isSavingAttendance,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Swap role") }
                 }
                 if (transferStatus.isNotBlank()) Text(transferStatus, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

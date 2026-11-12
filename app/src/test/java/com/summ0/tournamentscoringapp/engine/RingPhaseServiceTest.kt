@@ -87,21 +87,30 @@ class RingPhaseServiceTest {
     }
 
     @Test
-    fun swappingRolesMovesTheJudgeAndRecordsBothRoles() {
+    fun swappingCenterAndCornerMovesBothJudgesAndRecordsCenterCredit() {
         val service = base()
             .seat(ServiceRole.CENTER, center, at = "t0")
             .seat(ServiceRole.CORNER, corner1, at = "t1")
-            .swapRole("TSD-201", ServiceRole.CENTER, at = "t2")
-        assertEquals(listOf(center, corner1), service.seats[ServiceRole.CENTER])
-        assertNull(service.seats[ServiceRole.CORNER])
+            .seat(ServiceRole.CORNER, corner2, at = "t2")
+            .swapRoles(corner1.associationId, center.associationId, at = "t3")
+        assertEquals(listOf(corner1), service.seats[ServiceRole.CENTER])
+        assertEquals(listOf(corner2, center), service.seats[ServiceRole.CORNER])
         val last = service.history.last()
         assertEquals(ServiceAction.SWAPPED, last.action)
         assertEquals(ServiceRole.CENTER, last.role)
         assertEquals("corner", last.previousJudgeAssociationId)
-        assertEquals(ServiceRole.CENTER, service.roleOf("TSD-201"))
-        // Swapping to the same role, or an unseated judge, is a no-op.
-        assertEquals(service, service.swapRole("TSD-201", ServiceRole.CENTER))
-        assertEquals(service, service.swapRole("TSD-999", ServiceRole.CORNER))
+        assertEquals(center.associationId, last.swapPartnerAssociationId)
+        assertEquals(ServiceRole.CORNER, last.otherRole)
+        assertEquals(ServiceRole.CENTER, last.creditedRole)
+        assertEquals(ServiceRole.CENTER, service.roleOf(corner1.associationId))
+        assertEquals(ServiceRole.CORNER, service.roleOf(center.associationId))
+        assertEquals(service, service.swapRoles("TSD-999", corner1.associationId))
+        val sameRole = base()
+            .seat(ServiceRole.CORNER, corner1, at = "t0")
+            .seat(ServiceRole.CORNER, corner2, at = "t1")
+        assertThrows(IllegalArgumentException::class.java) {
+            sameRole.swapRoles(corner1.associationId, corner2.associationId)
+        }
     }
 
     @Test
@@ -128,7 +137,7 @@ class RingPhaseServiceTest {
                 replacementPinVerified = true,
                 at = "t3"
             )
-            .swapRole("TSD-203", ServiceRole.TIMEKEEPER, at = "t4")
+            .swapRoles("TSD-203", "TSD-100", at = "t4")
         val parsed = parseRingPhaseService(serializeRingPhaseService(service))
         assertEquals(service, parsed)
     }

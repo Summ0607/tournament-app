@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.52 (53)**. The installed version is shown beneath
+This checkpoint is version **1.53 (54)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.52 (53)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.53 (54)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -146,8 +146,8 @@ saved session.
 
 **Judge Service** on the check-in header records who is actually serving the
 loaded division. Choose P1/P2 assignment phase; it is independent of the scoring
-phase. The screen supports seating, replacing a seated judge, swapping a
-judge's role, and removing a judge, keeping a timestamped history of every
+phase. The screen supports seating, replacing a seated judge, swapping a Center
+and Corner judge, and removing a judge, keeping a timestamped history of every
 `SEATED`/`REPLACED`/`SWAPPED` change alongside the final lineup. Center, corner,
 scorekeeper, timekeeper and arbitrator are distinct actual roles. Division
 histories are stored separately per phase and survive restarts. **Load / refresh
@@ -169,6 +169,11 @@ event/ring/phase plan, so replacement works offline; an incorrect PIN blocks
 the change. The raw PIN is never stored or transferred. Each successful
 replacement records the assignment revision and a coordinator-review flag,
 which the service packet carries to server intake.
+
+For a role swap, select one seated Center judge and one seated Corner judge.
+Either tablet operator can perform the swap without a PIN. The tablet exchanges
+their actual seats and records both identities; when imported, both receive
+Center service credit only.
 
 **Transfer ring-phase service** consolidates all locally stored division
 histories for that ring and phase into one packet with its own submission ID.

@@ -58,7 +58,10 @@ data class ServiceHistoryEntry(
     val previousJudgeAssociationId: String? = null,
     val assignmentRevision: String? = null,
     val replacementPinVerified: Boolean? = null,
-    val requiresCoordinatorReview: Boolean = false
+    val requiresCoordinatorReview: Boolean = false,
+    val swapPartnerAssociationId: String? = null,
+    val otherRole: ServiceRole? = null,
+    val creditedRole: ServiceRole? = null
 )
 
 /**
@@ -121,17 +124,39 @@ data class RingPhaseService(
         )
     }
 
-    /** Moves an already-seated judge from one role to another. */
-    fun swapRole(associationId: String, toRole: ServiceRole, at: String = Instant.now().toString()): RingPhaseService {
-        val fromRole = roleOf(associationId) ?: return this
-        if (fromRole == toRole) return this
-        val judge = judgeAt(fromRole, associationId) ?: return this
+    /** Exchanges a Center and Corner judge; both receive Center service credit. */
+    fun swapRoles(
+        firstAssociationId: String,
+        secondAssociationId: String,
+        at: String = Instant.now().toString()
+    ): RingPhaseService {
+        require(!firstAssociationId.equals(secondAssociationId, ignoreCase = true)) {
+            "Select two different judges for a role swap."
+        }
+        val firstRole = roleOf(firstAssociationId) ?: return this
+        val secondRole = roleOf(secondAssociationId) ?: return this
+        require(setOf(firstRole, secondRole) == setOf(ServiceRole.CENTER, ServiceRole.CORNER)) {
+            "Role swaps are between Center and Corner assignments."
+        }
+        val firstJudge = judgeAt(firstRole, firstAssociationId) ?: return this
+        val secondJudge = judgeAt(secondRole, secondAssociationId) ?: return this
         val nextSeats = seats.toMutableMap()
-        nextSeats[fromRole] = seats[fromRole].orEmpty().filterNot { it.associationId == associationId }
-        nextSeats[toRole] = (seats[toRole].orEmpty()) + judge
+        nextSeats[firstRole] = seats[firstRole].orEmpty()
+            .filterNot { it.associationId == firstAssociationId } + secondJudge
+        nextSeats[secondRole] = seats[secondRole].orEmpty()
+            .filterNot { it.associationId == secondAssociationId } + firstJudge
         return copy(
             seats = nextSeats.pruneEmptyRoles(),
-            history = history + ServiceHistoryEntry(at, ServiceAction.SWAPPED, toRole, associationId, fromRole.wire)
+            history = history + ServiceHistoryEntry(
+                at = at,
+                action = ServiceAction.SWAPPED,
+                role = secondRole,
+                judgeAssociationId = firstAssociationId,
+                previousJudgeAssociationId = firstRole.wire,
+                swapPartnerAssociationId = secondAssociationId,
+                otherRole = firstRole,
+                creditedRole = ServiceRole.CENTER
+            )
         )
     }
 
@@ -180,6 +205,9 @@ fun serializeRingPhaseService(service: RingPhaseService): JSONObject {
                     entry.assignmentRevision?.let { put("assignmentRevision", it) }
                     entry.replacementPinVerified?.let { put("replacementPinVerified", it) }
                     if (entry.requiresCoordinatorReview) put("requiresCoordinatorReview", true)
+                    entry.swapPartnerAssociationId?.let { put("swapPartnerAssociationId", it) }
+                    entry.otherRole?.let { put("otherRole", it.wire) }
+                    entry.creditedRole?.let { put("creditedRole", it.wire) }
                 })
             }
         })
@@ -214,6 +242,25 @@ fun parseRingPhaseService(root: JSONObject): RingPhaseService {
             val item = historyJson.getJSONObject(index)
             val action = ServiceAction.parse(item.optString("action", "")) ?: continue
             val role = ServiceRole.fromWire(item.optString("role", "")) ?: continue
+            val swapPartnerAssociationId = if (item.isNull("swapPartnerAssociationId")) {
+                null
+            } else {
+                item.optString("swapPartnerAssociationId").ifBlank { null }
+            }
+            val otherRole = item.optString("otherRole").takeIf { it.isNotBlank() }
+                ?.let { ServiceRole.fromWire(it) }
+            val creditedRole = item.optString("creditedRole").takeIf { it.isNotBlank() }
+                ?.let { ServiceRole.fromWire(it) }
+            val hasSwapMetadata = item.has("swapPartnerAssociationId") ||
+                item.has("otherRole") || item.has("creditedRole")
+            require(
+                !hasSwapMetadata || (
+                    action == ServiceAction.SWAPPED &&
+                        !swapPartnerAssociationId.isNullOrBlank() &&
+                        otherRole != null &&
+                        creditedRole == ServiceRole.CENTER
+                    )
+            ) { "Saved role-swap history is missing valid participant or credit details." }
             history += ServiceHistoryEntry(
                 at = item.optString("at", ""),
                 action = action,
@@ -238,7 +285,10 @@ fun parseRingPhaseService(root: JSONObject): RingPhaseService {
                     item.getBoolean("requiresCoordinatorReview")
                 } else {
                     false
-                }
+                },
+                swapPartnerAssociationId = swapPartnerAssociationId,
+                otherRole = otherRole,
+                creditedRole = creditedRole
             )
         }
     }
