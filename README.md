@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.57 (58)**. The installed version is always shown
+This checkpoint is version **1.58 (59)**. The installed version is always shown
 in a small bottom-right footer on the main screens, including startup, waiting,
 check-in, scoring and results. The footer stays outside scrolling content and
 clear of Android navigation controls. Server Configuration also shows the version,
@@ -53,7 +53,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.57 (58)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.58 (59)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -78,6 +78,22 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    laptop clock. Do not change the live laptop clock for testing. Never resolve a
    certificate error by switching to HTTP, installing an unknown CA globally,
    or disabling hostname/certificate checks.
+
+### Updates before ring connection
+
+At startup, the app checks the saved HTTPS server for a newer APK before
+reconnecting or asking for ring authorization. Update checks and downloads do
+not require a ring credential. If the first QR scan discovers a different server,
+the app checks that server before connecting the ring and saves the authorization
+before handing off to Android's installer.
+
+**Later** continues the connection flow without updating. Update prompts are
+deferred while a division is loaded and can appear when the ring is waiting
+again. Failed update checks are logged and do not prevent offline work.
+Server settings, division records, and still-valid daily ring authorization
+survive an in-place update; reopening the app reconnects without another QR
+scan. Expired or replaced authorization still requires today's code.
+Android's installer may require the operator to reopen the app after updating.
 
 ### Daily ring credentials
 

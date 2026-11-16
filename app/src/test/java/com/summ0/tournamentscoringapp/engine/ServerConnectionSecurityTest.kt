@@ -1,11 +1,33 @@
 package com.summ0.tournamentscoringapp.engine
 
+import com.sun.net.httpserver.HttpServer
+import java.net.InetSocketAddress
 import javax.net.ssl.SSLHandshakeException
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ServerConnectionSecurityTest {
+    @Test
+    fun updateVersionCanBeCheckedBeforeAnyRingIsAuthorized() = runBlocking {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/version") { exchange ->
+            assertEquals("GET", exchange.requestMethod)
+            assertNull(exchange.requestHeaders.getFirst("Authorization"))
+            val response = """{"versionCode":59,"versionName":"1.58"}""".toByteArray()
+            exchange.sendResponseHeaders(200, response.size.toLong())
+            exchange.responseBody.use { it.write(response) }
+        }
+        server.start()
+        try {
+            assertEquals(59, fetchServerVersionCode("http://127.0.0.1:${server.address.port}/"))
+        } finally {
+            server.stop(0)
+        }
+    }
+
     @Test
     fun dnsAddressAlwaysUsesConfiguredHttpsEndpoint() {
         assertEquals(

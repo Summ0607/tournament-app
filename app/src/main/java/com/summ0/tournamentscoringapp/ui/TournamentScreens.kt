@@ -365,6 +365,10 @@ internal fun CheckInScreen(
     val tabletLabel = remember { deviceLabel() }
     val screenScope = rememberCoroutineScope()
     var showUpdateDialog by remember { mutableStateOf(false) }
+    var startupRecovered by remember { mutableStateOf(false) }
+    var pendingRingConnection by remember { mutableStateOf(false) }
+    var checkedUpdateServer by remember { mutableStateOf<String?>(null) }
+    var updateServerBaseUrl by remember { mutableStateOf("") }
     var isDownloadingUpdate by remember { mutableStateOf(false) }
     var updateDownloadError by remember { mutableStateOf("") }
     var showExitConfirmationDialog by remember { mutableStateOf(false) }
@@ -1501,7 +1505,7 @@ internal fun CheckInScreen(
                 serverBaseUrl = server
                 selectedLaunchRingId = ring
                 launchServerReachable = true
-                connectSelectedRing()
+                pendingRingConnection = true
             }
         )
     }
@@ -1515,8 +1519,9 @@ internal fun CheckInScreen(
                 ?.let { if (it.phase == "P1" || it.phase == "P2") it else it.copy(phase = "P1") }
             judgeServicePhase = currentService?.phase ?: "P1"
         }
-        if (TabletAuthorization.server() != null) reconnectCurrentRing()
-        else refreshLaunchRingOptions()
+        pendingRingConnection = TabletAuthorization.server() != null
+        startupRecovered = true
+        if (!pendingRingConnection) refreshLaunchRingOptions()
     }
 
     LaunchedEffect(activeDivisionAnchor, currentRingId, judgeServicePhase, currentJudgeAttendance) {
@@ -1638,13 +1643,20 @@ internal fun CheckInScreen(
         }
     }
 
-    // Check for app updates when server URL is known
-    LaunchedEffect(serverBaseUrl) {
-        if (serverBaseUrl.isNotBlank()) {
+    LaunchedEffect(startupRecovered, serverBaseUrl, currentGroupBanner.isLoaded, pendingRingConnection, showUpdateDialog) {
+        if (!startupRecovered) return@LaunchedEffect
+        if (!currentGroupBanner.isLoaded && checkedUpdateServer != serverBaseUrl) {
             val serverVersionCode = fetchServerVersionCode(serverBaseUrl)
-            if (serverVersionCode > BuildConfig.VERSION_CODE) {
+            checkedUpdateServer = serverBaseUrl
+            if (serverVersionCode != null && serverVersionCode > BuildConfig.VERSION_CODE) {
+                updateServerBaseUrl = serverBaseUrl
                 showUpdateDialog = true
+                return@LaunchedEffect
             }
+        }
+        if (pendingRingConnection && !showUpdateDialog) {
+            pendingRingConnection = false
+            reconnectCurrentRing()
         }
     }
 
@@ -2111,12 +2123,12 @@ internal fun CheckInScreen(
                         updateDownloadError = ""
                         screenScope.launch {
                             try {
-                                val apkUrl = "${serverBaseUrl.trimEnd('/')}/download-app"
+                                val apkUrl = "${updateServerBaseUrl.trimEnd('/')}/download-app"
                                 val dir = File(updateContext.cacheDir, "apk_downloads").also { it.mkdirs() }
                                 val apkFile = File(dir, "update.apk")
                                 withContext(Dispatchers.IO) {
                                     val conn = URL(apkUrl).openConnection() as HttpURLConnection
-                                    TabletAuthorization.applyTo(conn)
+                                    conn.instanceFollowRedirects = false
                                     conn.connectTimeout = 10_000
                                     conn.readTimeout = 30_000
                                     try {

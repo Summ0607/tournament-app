@@ -342,13 +342,14 @@ suspend fun sendRingHeartbeat(
     return fetchJsonObject(heartbeatUrl, method = "POST", jsonBody = payload)
 }
 
-suspend fun fetchServerVersionCode(serverBaseUrl: String): Int {
-    return try {
-        val result = fetchJsonObject("${serverBaseUrl.trimEnd('/')}/api/version")
-        result.root?.optInt("versionCode", 0) ?: 0
-    } catch (_: Exception) {
-        0
+suspend fun fetchServerVersionCode(serverBaseUrl: String): Int? {
+    val result = fetchJsonObject("${serverBaseUrl.trimEnd('/')}/api/version", authorize = false)
+    val versionCode = result.root?.optInt("versionCode", 0)
+    if (versionCode == null || versionCode < 1) {
+        Log.w("AppUpdate", result.errorMessage ?: "The server returned an invalid app version.")
+        return null
     }
+    return versionCode
 }
 
 data class DivisionResultSubmissionRingAssignment(

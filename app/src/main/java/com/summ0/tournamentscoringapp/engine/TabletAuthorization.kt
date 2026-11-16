@@ -64,8 +64,11 @@ object TabletAuthorization {
         require(token.matches(Regex("[a-f0-9]{64}")) && event.isNotBlank() && ring.isNotBlank()) {
             "Invalid tablet authorization response."
         }
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString("server", server).putString("event", event).putString("ring", ring).putString("credential", token).apply()
+        check(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("server", server).putString("event", event).putString("ring", ring)
+            .putString("credential", token).commit()) {
+            "Unable to save tablet authorization. Scan the ring QR code again."
+        }
         credential = Credential(server, event, ring, token)
     }
 

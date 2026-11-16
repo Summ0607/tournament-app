@@ -111,7 +111,7 @@ class MainViewModel(
         progress: HeartbeatProgressSnapshot
     ): JsonFetchResult = sendRingHeartbeat(serverBaseUrl, ringId, phase, tabletLabel, progress)
 
-    suspend fun requestServerVersionCode(serverBaseUrl: String): Int = fetchServerVersionCode(serverBaseUrl)
+    suspend fun requestServerVersionCode(serverBaseUrl: String): Int? = fetchServerVersionCode(serverBaseUrl)
 
     suspend fun finalizeAndSubmitResults(
         serverBaseUrl: String,
