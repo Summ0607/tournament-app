@@ -11,8 +11,8 @@ android {
         applicationId = "com.summ0.tournamentscoringapp"
         minSdk = 26
         targetSdk = 37
-        versionCode = 54
-        versionName = "1.53"
+        versionCode = 57
+        versionName = "1.56"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

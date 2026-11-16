@@ -276,6 +276,54 @@ class DivisionStore(baseDir: File) {
         return true
     }
 
+    fun loadJudgeService(
+        plan: JSONObject,
+        attendance: RingPhaseJudgeAttendance,
+        anchor: String
+    ): RingPhaseService {
+        val file = judgeAttendanceFile(plan)
+        val shared = if (file.isFile) JSONObject(file.readText()).optJSONObject("service")
+            ?.let(::parseRingPhaseService) else null
+        require(shared == null || shared.ringId == attendance.ringId && shared.phase == attendance.phase) {
+            "Saved judge service belongs to a different ring or phase."
+        }
+        val division = anchor.takeIf { it.isNotBlank() }?.let { loadService(it, attendance.phase) }
+            ?.let(::parseRingPhaseService)?.takeIf {
+                it.ringId == attendance.ringId && it.phase == attendance.phase && it.groupAnchor == anchor
+            }
+        if (shared?.groupAnchor == anchor) return shared
+        if (division != null) {
+            if (shared != null) return division
+            return attendance.officials.filter { official ->
+                official.status == JudgeAttendanceStatus.PRESENT &&
+                    division.history.none { it.previousJudgeAssociationId == official.associationId }
+            }.fold(division) { service, official -> service.withJudgePresence(official, true) }
+        }
+        if (shared != null) return shared.forDivision(anchor)
+        return attendance.officials.fold(
+            RingPhaseService(attendance.ringId, attendance.phase, anchor)
+        ) { service, official ->
+            service.withJudgePresence(official, official.status == JudgeAttendanceStatus.PRESENT)
+        }
+    }
+
+    fun saveJudgeCheckIn(
+        plan: JSONObject,
+        attendance: RingPhaseJudgeAttendance,
+        service: RingPhaseService
+    ) {
+        val validated = parseJudgeAttendance(serializeJudgeAttendance(attendance), plan)
+        require(service.ringId == validated.ringId && service.phase == validated.phase) {
+            "Judge service belongs to a different ring or phase."
+        }
+        val root = serializeJudgeAttendance(validated).put("service", serializeRingPhaseService(service))
+        writeAtomic(judgeAttendanceFile(plan), root.toString(2))
+        if (service.groupAnchor.isNotBlank() &&
+            !saveService(service.groupAnchor, serializeRingPhaseService(service))) {
+            throw IOException("Judge check-in saved, but division service could not be saved. Reopen the division and retry.")
+        }
+    }
+
     fun prepareServicePacket(ringId: String, phase: String, eventName: String): StoredServicePacket {
         require(phase == "P1" || phase == "P2") { "Select P1 or P2 for service transfer." }
         require(eventName.isNotBlank()) { "Pair this tablet with a tournament before transferring service." }

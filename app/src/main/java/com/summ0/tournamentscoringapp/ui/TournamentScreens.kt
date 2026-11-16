@@ -100,10 +100,11 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -136,37 +137,6 @@ import kotlinx.coroutines.delay
 
 internal const val EXTRA_LAUNCH_SCREEN = "com.summ0.tournamentscoringapp.extra.LAUNCH_SCREEN"
 
-private fun formatJudgePlanSummary(plan: JSONObject, source: String): String {
-    val positions = plan.optJSONObject("positions") ?: JSONObject()
-    val roster = listOf("center", "corner", "sktk").joinToString(" · ") { role ->
-        val names = positions.optJSONArray(role)?.let { officials ->
-            (0 until officials.length()).mapNotNull { index ->
-                officials.optJSONObject(index)?.let { official ->
-                    "${official.optString("name")} (${official.optString("associationId")})"
-                }
-            }
-        }.orEmpty()
-        "${role.uppercase()}: ${names.joinToString()}"
-    }
-    val arbitrators = plan.optJSONArray("arbitrators")?.let { officials ->
-        (0 until officials.length()).mapNotNull { index ->
-            officials.optJSONObject(index)?.let {
-                "${it.optString("name")} (${it.optString("associationId")})"
-            }
-        }
-    }.orEmpty()
-    val replacementPin = if (plan.optBoolean("replacementPinConfigured")) {
-        "Replacement PIN verification is available (PIN hidden)."
-    } else {
-        "No replacement PIN verification data is configured."
-    }
-    return "$source; assignment revision ${plan.optString("assignmentRevision")}. $roster" +
-        if (arbitrators.isEmpty()) {
-            " · $replacementPin"
-        } else {
-            " · ARBITRATORS: ${arbitrators.joinToString()} · $replacementPin"
-        }
-}
 internal const val LAUNCH_SCREEN_HYUNGS = "hyungs"
 internal const val LAUNCH_SCREEN_WEAPONS = "weapons"
 
@@ -401,6 +371,7 @@ internal fun CheckInScreen(
     var showDivisionQrScanner by remember { mutableStateOf(false) }
     var showStoredDivisions by remember { mutableStateOf(false) }
     var showJudgeServiceDialog by remember { mutableStateOf(false) }
+    var openJudgeServiceChanges by remember { mutableStateOf(false) }
     var storedDivisionRecords by remember { mutableStateOf(emptyList<DivisionRecord>()) }
     var currentService by remember { mutableStateOf<RingPhaseService?>(null) }
     var judgeServicePhase by rememberSaveable { mutableStateOf("P1") }
@@ -411,6 +382,7 @@ internal fun CheckInScreen(
     var currentJudgeAttendance by remember { mutableStateOf<RingPhaseJudgeAttendance?>(null) }
     var judgeAttendanceStatus by remember { mutableStateOf("") }
     var isSavingJudgeAttendance by remember { mutableStateOf(false) }
+    var judgePlanRequest by remember { mutableStateOf(0) }
     var pendingServicePacketExport by remember { mutableStateOf("") }
     val servicePacketExportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -837,12 +809,24 @@ internal fun CheckInScreen(
         showStoredDivisions = true
     }
 
-    fun persistCurrentService(service: RingPhaseService) {
-        currentService = service
-        judgeServicePhase = service.phase
-        val anchor = activeDivisionAnchor
-        if (anchor.isNotBlank()) {
-            divisionStore.saveService(anchor, serializeRingPhaseService(service))
+    fun persistCurrentService(service: RingPhaseService): Boolean {
+        val plan = currentJudgePlan
+        val attendance = currentJudgeAttendance
+        if (plan == null || attendance == null) {
+            judgeAttendanceStatus = "Refresh assigned judges before recording changes."
+            return false
+        }
+        return try {
+            val updated = attendanceFromService(attendance, service)
+            divisionStore.saveJudgeCheckIn(plan, updated, service)
+            currentService = service
+            currentJudgeAttendance = updated
+            judgeServicePhase = service.phase
+            judgeAttendanceStatus = ""
+            true
+        } catch (error: Exception) {
+            judgeAttendanceStatus = error.message ?: "Unable to save judge service."
+            false
         }
     }
 
@@ -863,22 +847,24 @@ internal fun CheckInScreen(
         )
         currentService = service
         judgeServicePhase = phase
-        if (anchor.isNotBlank()) divisionStore.saveService(anchor, serializeRingPhaseService(service))
         return service
     }
 
-    suspend fun activateJudgePlan(plan: JSONObject, source: String) {
+    fun activateJudgePlan(plan: JSONObject) {
         currentJudgePlan = plan
         try {
-            currentJudgeAttendance = withContext(Dispatchers.IO) {
-                divisionStore.loadJudgeAttendance(plan) ?: newJudgeAttendance(plan)
-            }
+            val saved = divisionStore.loadJudgeAttendance(plan) ?: newJudgeAttendance(plan)
+            val service = divisionStore.loadJudgeService(plan, saved, activeDivisionAnchor)
+            val updated = attendanceFromService(saved, service)
+            divisionStore.saveJudgeCheckIn(plan, updated, service)
+            currentJudgeAttendance = updated
+            currentService = service
             judgeAttendanceStatus = ""
-            judgePlanSummary = formatJudgePlanSummary(plan, source)
+            judgePlanSummary = ""
         } catch (error: Exception) {
             currentJudgeAttendance = null
             judgeAttendanceStatus = error.message ?: "Unable to recover saved attendance."
-            judgePlanSummary = formatJudgePlanSummary(plan, source)
+            judgePlanSummary = ""
         }
     }
 
@@ -890,14 +876,15 @@ internal fun CheckInScreen(
         judgeAttendanceStatus = "Saving attendance..."
         screenScope.launch {
             try {
-                val updated = withContext(Dispatchers.IO) {
-                    val latest = divisionStore.loadJudgeAttendance(plan) ?: attendance
-                    updateJudgeAttendance(latest, associationId, status).also {
-                        divisionStore.saveJudgeAttendance(plan, it)
-                    }
-                }
+                val latest = divisionStore.loadJudgeAttendance(plan) ?: attendance
+                val updated = updateJudgeAttendance(latest, associationId, status)
+                val official = updated.officials.first { it.associationId.equals(associationId, ignoreCase = true) }
+                val service = divisionStore.loadJudgeService(plan, latest, activeDivisionAnchor)
+                    .withJudgePresence(official, status == JudgeAttendanceStatus.PRESENT)
+                divisionStore.saveJudgeCheckIn(plan, updated, service)
                 currentJudgeAttendance = updated
-                judgeAttendanceStatus = "Attendance saved on this tablet. It does not record service credit."
+                currentService = service
+                judgeAttendanceStatus = ""
             } catch (error: Exception) {
                 judgeAttendanceStatus = error.message ?: "Unable to save judge attendance."
             } finally {
@@ -907,6 +894,7 @@ internal fun CheckInScreen(
     }
 
     fun loadJudgePlan(phase: String) {
+        val request = ++judgePlanRequest
         val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
         if (ringId.isBlank()) {
             judgePlanSummary = "Authorize a ring before loading its saved plan."
@@ -920,17 +908,19 @@ internal fun CheckInScreen(
             val cached = pairedEvent?.let {
                 withContext(Dispatchers.IO) { divisionStore.loadJudgePlan(it, ringId, phase) }
             }
+            if (request != judgePlanRequest) return@launch
             if (cached != null) {
-                activateJudgePlan(cached, "Saved on this tablet")
+                activateJudgePlan(cached)
             } else {
                 judgePlanSummary = "Loading saved assignment plan..."
             }
             val server = TabletAuthorization.server() ?: serverBaseUrl
             val result = fetchRingJudgePlan(server, ringId, phase)
+            if (request != judgePlanRequest) return@launch
             val root = result.root
             if (root == null) {
                 judgePlanSummary = if (cached != null) {
-                    "${formatJudgePlanSummary(cached, "Offline copy")} Server unavailable; this saved roster may be out of date."
+                    "Offline roster; assignments may be out of date."
                 } else {
                     result.errorMessage ?: "Unable to load the saved assignment plan."
                 }
@@ -941,7 +931,7 @@ internal fun CheckInScreen(
                 root.optString("phase") != phase ||
                 (pairedEvent != null && root.optString("eventName") != pairedEvent)) {
                 judgePlanSummary = if (cached != null) {
-                    "${formatJudgePlanSummary(cached, "Offline copy")} The server returned a mismatched plan."
+                    "Using saved roster; the server returned a mismatched plan."
                 } else {
                     "The server returned a mismatched judge assignment plan."
                 }
@@ -973,11 +963,23 @@ internal fun CheckInScreen(
                 withContext(Dispatchers.IO) {
                     divisionStore.saveJudgePlan(root.optString("eventName"), ringId, phase, root)
                 }
-                activateJudgePlan(root, "Downloaded and saved on this tablet")
+                if (request != judgePlanRequest) return@launch
+                activateJudgePlan(root)
             } catch (error: Exception) {
                 judgePlanSummary = error.message ?: "Unable to save the assignment plan on this tablet."
             }
         }
+    }
+
+    fun openJudgeServiceAfterRingConnect() {
+        if (currentService?.let {
+                it.ringId != currentRingId || it.groupAnchor != activeDivisionAnchor ||
+                    it.phase != judgeServicePhase
+            } == true) {
+            currentService = null
+        }
+        showJudgeServiceDialog = true
+        loadJudgePlan(judgeServicePhase)
     }
 
     fun submitJudgeServicePacket() {
@@ -1236,6 +1238,7 @@ internal fun CheckInScreen(
                         progress = currentHeartbeatProgress
                     )
                 )
+                openJudgeServiceAfterRingConnect()
                 onSuccess?.invoke()
             } else {
                 if (hadAssignedRing) {
@@ -1453,6 +1456,7 @@ internal fun CheckInScreen(
 
     if (showJudgeServiceDialog) {
         JudgeServiceDialog(
+            ringLabel = currentRingLabel.ifBlank { currentRingId },
             service = currentService ?: RingPhaseService(
                 ringId = currentRingId,
                 phase = judgeServicePhase,
@@ -1478,7 +1482,11 @@ internal fun CheckInScreen(
             onSubmit = { submitJudgeServicePacket() },
             onExportUsb = { exportJudgeServicePacketToUsb() },
             onImportUsbReceipt = { selectServiceReceiptFromUsb() },
-            onDismiss = { showJudgeServiceDialog = false }
+            onDismiss = {
+                showJudgeServiceDialog = false
+                openJudgeServiceChanges = false
+            },
+            initiallyShowChanges = openJudgeServiceChanges
         )
     }
 
@@ -1509,6 +1517,23 @@ internal fun CheckInScreen(
         }
         if (TabletAuthorization.server() != null) reconnectCurrentRing()
         else refreshLaunchRingOptions()
+    }
+
+    LaunchedEffect(activeDivisionAnchor, currentRingId, judgeServicePhase, currentJudgeAttendance) {
+        val plan = currentJudgePlan
+        val attendance = currentJudgeAttendance
+        if (plan != null && attendance != null && activeDivisionAnchor.isNotBlank() &&
+            plan.optString("ringId") == currentRingId && plan.optString("phase") == judgeServicePhase &&
+            currentService?.groupAnchor != activeDivisionAnchor && !isSavingJudgeAttendance) {
+            try {
+                val service = divisionStore.loadJudgeService(plan, attendance, activeDivisionAnchor)
+                divisionStore.saveJudgeCheckIn(plan, attendanceFromService(attendance, service), service)
+                currentService = service
+                currentJudgeAttendance = attendanceFromService(attendance, service)
+            } catch (error: Exception) {
+                judgeAttendanceStatus = error.message ?: "Unable to record judges for this division."
+            }
+        }
     }
 
     // Durably snapshot the active division's session whenever its state changes.
@@ -1974,7 +1999,6 @@ internal fun CheckInScreen(
             tabletLabel = tabletLabel,
             divisionCompetitors = competitors,
             groupSize = competitors.size,
-            requiredJudgeCount = judgeCount,
             weaponsPlacements = overallAwards.weapons,
             hyungsPlacements = overallAwards.hyungs,
             sparringPlacements = overallAwards.sparring,
@@ -2167,6 +2191,11 @@ internal fun CheckInScreen(
             onConnectSelectedRing = { connectSelectedRing() },
             onScanRing = { showRingPairing = true },
             onScanDivisionQr = { showDivisionQrScanner = true },
+            onOpenJudgeService = { openJudgeServiceAfterRingConnect() },
+            onFinalizeJudgeService = {
+                openJudgeServiceChanges = true
+                openJudgeServiceAfterRingConnect()
+            },
             onOpenStoredDivisions = {
                 refreshStoredDivisions()
                 showStoredDivisions = true
@@ -2636,7 +2665,7 @@ private fun CheckInHeaderCard(
                             contentPadding = actionPadding,
                             modifier = Modifier.height(if (dense) 34.dp else 40.dp)
                         ) {
-                            Text("Judge Service", fontSize = actionTextSize)
+                            Text("Judge Check-In", fontSize = actionTextSize)
                         }
                     }
                 }
@@ -2646,7 +2675,7 @@ private fun CheckInHeaderCard(
 }
 
 @Composable
-private fun LaunchScreenPanel(
+internal fun LaunchScreenPanel(
     currentRingLabel: String,
     currentRingId: String,
     status: String,
@@ -2658,6 +2687,8 @@ private fun LaunchScreenPanel(
     onConnectSelectedRing: () -> Unit,
     onScanRing: () -> Unit,
     onScanDivisionQr: () -> Unit,
+    onOpenJudgeService: () -> Unit,
+    onFinalizeJudgeService: () -> Unit,
     onOpenStoredDivisions: () -> Unit,
     storedDivisionCount: Int,
     onEditServer: () -> Unit,
@@ -2829,6 +2860,18 @@ private fun LaunchScreenPanel(
                         fontSize = if (isCompactScreen) 13.sp else 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    OutlinedButton(
+                        onClick = onOpenJudgeService,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Judge Check-In")
+                    }
+                    Button(
+                        onClick = onFinalizeJudgeService,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Finalize phase / upload service")
+                    }
                 }
                 if (!serverReachable) {
                     if (status.startsWith("Waiting for server") || status.startsWith("Unable")) {
@@ -2913,8 +2956,9 @@ private fun StoredDivisionsDialog(
 
 @Composable
 private fun JudgeServiceDialog(
+    ringLabel: String,
     service: RingPhaseService,
-    onUpdate: (RingPhaseService) -> Unit,
+    onUpdate: (RingPhaseService) -> Boolean,
     onPhaseChange: (String) -> RingPhaseService,
     onLoadPlan: (String) -> Unit,
     planSummary: String,
@@ -2928,7 +2972,8 @@ private fun JudgeServiceDialog(
     onSubmit: () -> Unit,
     onExportUsb: () -> Unit,
     onImportUsbReceipt: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    initiallyShowChanges: Boolean = false
 ) {
     var working by remember(service) { mutableStateOf(service) }
     var selectedRole by remember(working.groupAnchor, working.phase) { mutableStateOf(ServiceRole.CENTER) }
@@ -2942,10 +2987,12 @@ private fun JudgeServiceDialog(
     var message by remember(working.groupAnchor, working.phase) { mutableStateOf<String?>(null) }
     var messageIsError by remember(working.groupAnchor, working.phase) { mutableStateOf(false) }
     var showTransferConfirmation by remember { mutableStateOf(false) }
+    var showChanges by remember { mutableStateOf(initiallyShowChanges) }
 
-    fun commit(next: RingPhaseService) {
+    fun commit(next: RingPhaseService): Boolean {
+        if (!onUpdate(next)) return false
         working = next
-        onUpdate(next)
+        return true
     }
 
     val pairedEvent = TabletAuthorization.event()
@@ -2978,14 +3025,18 @@ private fun JudgeServiceDialog(
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Judge service - ${working.phase.ifBlank { "phase" }}", fontWeight = FontWeight.Bold) },
+        onDismissRequest = { if (!isSavingAttendance && !isTransferring) onDismiss() },
+        title = {
+            Text(
+                "${if (showChanges) "Judge changes" else "Judge Check-In"} - $ringLabel - ${working.phase}",
+                fontWeight = FontWeight.Bold
+            )
+        },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(if (showChanges) 10.dp else 0.dp)
             ) {
-                Text("Assignment phase", fontWeight = FontWeight.SemiBold)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("P1", "P2").forEach { phase ->
                         OutlinedButton(
@@ -2998,77 +3049,75 @@ private fun JudgeServiceDialog(
                                 message = null
                                 messageIsError = false
                             },
-                            enabled = !isTransferring && !isSavingAttendance
+                            enabled = !isTransferring && !isSavingAttendance,
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (phase == working.phase) MaterialTheme.colorScheme.primaryContainer
+                                else Color.Transparent
+                            )
                         ) { Text(phase) }
                     }
                     OutlinedButton(
                         onClick = { onLoadPlan(working.phase) },
                         enabled = !isTransferring && !isSavingAttendance
                     ) {
-                        Text("Load / refresh saved plan")
+                        Text("Refresh")
                     }
                 }
                 if (planSummary.isNotBlank()) Text(planSummary, fontSize = 12.sp)
-                Text("Planned judge attendance", fontWeight = FontWeight.SemiBold)
-                Text("Attendance is operational only; confirming a judge does not create service experience.", fontSize = 12.sp)
-                if (!planMatches) {
-                    Text("Load the saved plan for ${working.ringId}, ${working.phase} to confirm attendance.", fontSize = 12.sp)
-                } else if (attendance == null) {
+                if (!showChanges && !planMatches) {
+                    if (planSummary.isBlank()) Text("No assigned judges for this phase.", fontSize = 12.sp)
+                } else if (!showChanges && attendance == null) {
                     Text(attendanceStatus.ifBlank { "Attendance could not be recovered; reload the saved plan." },
                         color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                } else if (attendance.officials.isEmpty()) {
+                } else if (!showChanges && attendance != null && attendance.officials.isEmpty()) {
                     Text("No judges are assigned to this ring and phase.", fontSize = 13.sp)
-                } else {
-                    listOf("center", "corner", "sktk").forEach { role ->
-                        val officials = attendance.officials.filter { it.assignedRole == role }
-                        if (officials.isNotEmpty()) {
-                            Text(
-                                when (role) {
-                                    "center" -> "Center"
-                                    "corner" -> "Corner"
-                                    else -> "SK/TK"
+                } else if (!showChanges && attendance != null) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Name", Modifier.weight(1f), fontSize = 12.sp)
+                        Text("Rank", Modifier.width(42.dp), fontSize = 12.sp)
+                        Text("Dan/ID", Modifier.width(76.dp), fontSize = 12.sp)
+                        Text("Present", Modifier.width(56.dp), fontSize = 12.sp, textAlign = TextAlign.Center)
+                    }
+                    attendance.officials.forEach { official ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(official.name, Modifier.weight(1f), fontSize = 14.sp)
+                            Text(official.rank, Modifier.width(42.dp), fontSize = 13.sp)
+                            Text(official.associationId, Modifier.width(76.dp), fontSize = 13.sp)
+                            Checkbox(
+                                checked = official.status == JudgeAttendanceStatus.PRESENT,
+                                onCheckedChange = { present ->
+                                    onAttendanceChange(official.associationId,
+                                        if (present) JudgeAttendanceStatus.PRESENT else JudgeAttendanceStatus.ABSENT)
                                 },
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 13.sp
-                            )
-                            officials.forEach { official ->
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Text(
-                                        "${official.name} (${official.associationId}) · ${official.status.name.lowercase().replaceFirstChar { it.uppercase() }}",
-                                        fontSize = 13.sp
-                                    )
-                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        OutlinedButton(
-                                            onClick = {
-                                                onAttendanceChange(official.associationId, JudgeAttendanceStatus.PRESENT)
-                                            },
-                                            enabled = !isSavingAttendance,
-                                            modifier = Modifier.weight(1f)
-                                        ) { Text("Present") }
-                                        OutlinedButton(
-                                            onClick = {
-                                                onAttendanceChange(official.associationId, JudgeAttendanceStatus.ABSENT)
-                                            },
-                                            enabled = !isSavingAttendance,
-                                            modifier = Modifier.weight(1f)
-                                        ) { Text("Absent") }
-                                        TextButton(
-                                            onClick = {
-                                                onAttendanceChange(official.associationId, JudgeAttendanceStatus.UNCONFIRMED)
-                                            },
-                                            enabled = !isSavingAttendance,
-                                            modifier = Modifier.weight(1f)
-                                        ) { Text("Clear") }
-                                    }
+                                enabled = !isSavingAttendance && !isTransferring,
+                                modifier = Modifier.width(56.dp).semantics {
+                                    contentDescription = "Present: ${official.name}"
                                 }
-                            }
+                            )
                         }
                     }
-                    if (attendanceStatus.isNotBlank()) Text(attendanceStatus, fontSize = 12.sp)
+                    val plannedIds = attendance.officials.map { it.associationId }.toSet()
+                    working.seats.values.flatten().filter { it.associationId !in plannedIds }.forEach { judge ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(judge.name, Modifier.weight(1f), fontSize = 14.sp)
+                            Text(judge.rank, Modifier.width(42.dp), fontSize = 13.sp)
+                            Text(judge.associationId, Modifier.width(76.dp), fontSize = 13.sp)
+                            Checkbox(
+                                checked = true,
+                                onCheckedChange = { commit(working.unseat(judge.associationId)) },
+                                enabled = !isSavingAttendance && !isTransferring,
+                                modifier = Modifier.width(56.dp).semantics {
+                                    contentDescription = "Present: ${judge.name}"
+                                }
+                            )
+                        }
+                    }
                 }
+                if (attendanceStatus.isNotBlank()) Text(attendanceStatus, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                if (showChanges) {
                 Text("Current lineup", fontWeight = FontWeight.SemiBold)
                 if (working.seats.values.all { it.isEmpty() }) {
-                    Text("No judges recorded yet.", fontSize = 13.sp)
+                    Text("No judges marked Present.", fontSize = 13.sp)
                 } else {
                     ServiceRole.entries.forEach { role ->
                         val judges = working.seats[role].orEmpty()
@@ -3123,7 +3172,7 @@ private fun JudgeServiceDialog(
                                         commit(working.unseat(judge.associationId))
                                     },
                                     enabled = !isTransferring && !isSavingAttendance
-                                ) { Text("Remove") }
+                                ) { Text("Left ring") }
                                 }
                             }
                         }
@@ -3152,12 +3201,12 @@ private fun JudgeServiceDialog(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             onClick = {
-                                commit(
+                                if (!commit(
                                     working.swapRoles(
                                         firstSwapAssociationId,
                                         secondSwapAssociationId
                                     )
-                                )
+                                )) return@Button
                                 firstSwapAssociationId = ""
                                 secondSwapAssociationId = ""
                                 message = "Role swap recorded. Both judges receive Center service credit only; no PIN was required."
@@ -3174,41 +3223,9 @@ private fun JudgeServiceDialog(
                         ) { Text("Clear") }
                     }
                 }
+                if (replacementTargetId.isNotBlank()) {
                 HorizontalDivider()
-                Text("Add or replace", fontWeight = FontWeight.SemiBold)
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    ServiceRole.entries.filter { it.selectable }.forEach { role ->
-                        val selected = role == selectedRole
-                        OutlinedButton(
-                            onClick = {
-                                selectedRole = role
-                                replacementTargetId = ""
-                                replacementPin = ""
-                                    firstSwapAssociationId = ""
-                                    secondSwapAssociationId = ""
-                                    message = null
-                                messageIsError = false
-                            },
-                            colors = if (selected) {
-                                ButtonDefaults.outlinedButtonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-                            } else {
-                                ButtonDefaults.outlinedButtonColors()
-                            }
-                        ) {
-                            Text(role.label, fontSize = 12.sp)
-                        }
-                    }
-                }
-                OutlinedTextField(
-                    value = associationId,
-                    onValueChange = { associationId = it.trim() },
-                    label = { Text("Association ID") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Text("Replacement", fontWeight = FontWeight.SemiBold)
                 OutlinedTextField(
                     value = judgeName,
                     onValueChange = { judgeName = it },
@@ -3217,9 +3234,16 @@ private fun JudgeServiceDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
+                    value = associationId,
+                    onValueChange = { associationId = it.trim() },
+                    label = { Text("Dan/Association ID") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
                     value = judgeRank,
                     onValueChange = { judgeRank = it },
-                    label = { Text("Rank (optional)") },
+                    label = { Text("Rank code") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -3268,6 +3292,11 @@ private fun JudgeServiceDialog(
                                 messageIsError = true
                                 return@Button
                             }
+                            if (judgeName.isBlank()) {
+                                message = "Name is required."
+                                messageIsError = true
+                                return@Button
+                            }
                             val judge = ServiceJudge(associationId, judgeName.trim(), judgeRank.trim())
                             val target = working.seats[selectedRole].orEmpty()
                                 .firstOrNull { it.associationId == replacementTargetId }
@@ -3298,7 +3327,7 @@ private fun JudgeServiceDialog(
                                     return@Button
                                 }
                                 val revision = judgePlan?.optString("assignmentRevision").orEmpty()
-                                commit(
+                                if (!commit(
                                     working.replace(
                                         selectedRole,
                                         target.associationId,
@@ -3306,7 +3335,7 @@ private fun JudgeServiceDialog(
                                         assignmentRevision = revision,
                                         replacementPinVerified = true
                                     )
-                                )
+                                )) return@Button
                                 replacementTargetId = ""
                                 replacementPin = ""
                                 associationId = ""; judgeName = ""; judgeRank = ""
@@ -3314,50 +3343,37 @@ private fun JudgeServiceDialog(
                                 messageIsError = false
                                 return@Button
                             }
-                            if (firstSwapAssociationId.isNotBlank()) {
-                                message = "Finish or clear the selected role swap before seating another judge."
-                                messageIsError = true
-                                return@Button
-                            }
-                            if (working.roleOf(associationId) != null) {
-                                message = "That judge is already seated. Use Swap role if they are serving another role."
-                                messageIsError = true
-                                return@Button
-                            }
-                            if (selectedRole != ServiceRole.CORNER && working.seats[selectedRole].orEmpty().isNotEmpty()) {
-                                message = "A ${selectedRole.label} is already seated. Select that judge's Replace action to replace them."
-                                messageIsError = true
-                                return@Button
-                            }
-                            commit(working.seat(selectedRole, judge))
-                            associationId = ""; judgeName = ""; judgeRank = ""; message = null
-                            messageIsError = false
                         },
                         enabled = !isTransferring && !isSavingAttendance,
                         modifier = Modifier.weight(1f)
-                    ) { Text(if (replacementTargetId.isBlank()) "Seat judge" else "Replace selected") }
+                    ) { Text("Record replacement") }
+                }
                 }
                 if (transferStatus.isNotBlank()) Text(transferStatus, fontSize = 12.sp)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = { showTransferConfirmation = true },
-                        enabled = !isTransferring,
+                        enabled = !isTransferring && !isSavingAttendance,
                         modifier = Modifier.weight(1f)
                     ) { Text("Save packet to USB", fontSize = 12.sp) }
                     OutlinedButton(
                         onClick = onImportUsbReceipt,
-                        enabled = !isTransferring,
+                        enabled = !isTransferring && !isSavingAttendance,
                         modifier = Modifier.weight(1f)
                     ) { Text("Import USB receipt", fontSize = 12.sp) }
+                }
                 }
             }
         },
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { showTransferConfirmation = true }, enabled = !isTransferring) {
-                    Text(if (isTransferring) "Transferring..." else "Transfer ring-phase service")
+                if (showChanges) {
+                    OutlinedButton(onClick = { showTransferConfirmation = true }, enabled = !isTransferring && !isSavingAttendance) {
+                        Text(if (isTransferring) "Transferring..." else "Transfer service")
+                    }
                 }
-                TextButton(onClick = onDismiss) { Text("Done") }
+                TextButton(onClick = { showChanges = !showChanges }) { Text(if (showChanges) "Check-In" else "Changes / transfer") }
+                TextButton(onClick = onDismiss, enabled = !isSavingAttendance && !isTransferring) { Text("Done") }
             }
         }
     )
@@ -4772,7 +4788,6 @@ private fun loadPacketSummary(packetFile: File): String {
         put("groupId", packet.optString("groupId", divisionId))
         put("divisionType", packet.optString("divisionType", "Division"))
         put("winnerSummary", winnerSummary)
-        put("signatureBlock", packet.optJSONObject("signatureBlock") ?: JSONObject())
         put("updatedAt", packet.optString("completedAt", packet.optString("generatedAt", "")))
     }.toString(2)
 }
@@ -4981,20 +4996,6 @@ internal fun formatSummaryPlacementLine(label: String, competitor: Competitor?):
     return "$label: $competitorText"
 }
 
-private val signatureFontFamily = FontFamily.Cursive
-private val signatureRankOptions = listOf(
-    "4th Gup",
-    "3rd Gup",
-    "2nd Gup",
-    "1st Gup",
-    "CDB",
-    "Cho Dan",
-    "E Dan",
-    "Sam Dan",
-    "Sah Dan",
-    "Oh Dan",
-    "Yuk Dan"
-)
 private const val COMPLETE_ROUND_TRACE_TAG = "CompleteRoundTrace"
 
 @Composable
@@ -5009,7 +5010,6 @@ private fun OverallAwardsScreen(
     tabletLabel: String,
     divisionCompetitors: List<Competitor>,
     groupSize: Int,
-    requiredJudgeCount: Int,
     weaponsPlacements: List<Pair<String, Competitor?>>, 
     hyungsPlacements: List<Pair<String, Competitor?>>, 
     sparringPlacements: List<Pair<String, Competitor?>>, 
@@ -5031,18 +5031,7 @@ private fun OverallAwardsScreen(
     onBackToSparring: () -> Unit,
     onExit: () -> Unit
 ) {
-    var judgeSignatures by remember { mutableStateOf(List(5) { SignatureEntry() }) }
-    var scorekeeperSignature by remember { mutableStateOf(SignatureEntry()) }
-    var timekeeperSignature by remember { mutableStateOf(SignatureEntry()) }
-    var onlyOneScorekeeperToday by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
-    val requiredScorekeeperCount = if (onlyOneScorekeeperToday) 1 else 2
-    val allSignaturesComplete = judgeSignatures
-        .take(requiredJudgeCount)
-        .all { isCompleteSignatureEntry(it) } &&
-        listOf(scorekeeperSignature, timekeeperSignature)
-            .take(requiredScorekeeperCount)
-            .all { isCompleteSignatureEntry(it) }
 
     Column(
         modifier = Modifier
@@ -5102,10 +5091,6 @@ private fun OverallAwardsScreen(
                         sparringRound0Bouts = sparringRound0Bouts,
                         sparringWinners = sparringWinners,
                         sparringBoutProgress = sparringBoutProgress,
-                        judgeSignatures = judgeSignatures.take(requiredJudgeCount),
-                        scorekeeperSignature = scorekeeperSignature,
-                        timekeeperSignature = timekeeperSignature,
-                        onlyOneScorekeeperToday = onlyOneScorekeeperToday,
                         completedAt = completedAt
                     )
                     val snapshot = buildSummarySheetSnapshot(
@@ -5126,15 +5111,10 @@ private fun OverallAwardsScreen(
                         hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
                         hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
                         sparringReviewLines = sparringReviewLines,
-                        judgeSignatures = judgeSignatures.take(requiredJudgeCount),
-                        scorekeeperSignature = scorekeeperSignature,
-                        timekeeperSignature = timekeeperSignature,
-                        onlyOneScorekeeperToday = onlyOneScorekeeperToday,
                         completedAt = completedAt
                     )
                     onCompleteRound(uploadRequest, snapshot.first, snapshot.second)
                 },
-                enabled = allSignaturesComplete,
                 modifier = Modifier.align(Alignment.CenterStart)
             ) {
                 Text("Complete Round")
@@ -5225,142 +5205,7 @@ private fun OverallAwardsScreen(
             }
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Judges / Staff Signatures", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                judgeSignatures.forEachIndexed { index, entry ->
-                    val judgeIsActive = index < requiredJudgeCount
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = entry.name,
-                            onValueChange = { updated ->
-                                judgeSignatures = judgeSignatures.toMutableList().also {
-                                    it[index] = it[index].copy(name = capitalizeWords(updated))
-                                }
-                            },
-                            label = { Text("Judge ${index + 1} Name") },
-                            singleLine = true,
-                            enabled = judgeIsActive,
-                            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = signatureFontFamily, fontSize = 28.sp),
-                            modifier = Modifier.weight(1.15f)
-                        )
-                        SignatureRankDropdown(
-                            value = entry.rank,
-                            enabled = judgeIsActive,
-                            onValueChange = { updated ->
-                                judgeSignatures = judgeSignatures.toMutableList().also {
-                                    it[index] = it[index].copy(rank = updated)
-                                }
-                            },
-                            modifier = Modifier.weight(0.55f)
-                        )
-                        OutlinedTextField(
-                            value = entry.number,
-                            onValueChange = { updated ->
-                                val sanitized = updated.filter { it.isDigit() }.take(6)
-                                judgeSignatures = judgeSignatures.toMutableList().also {
-                                    it[index] = it[index].copy(number = sanitized)
-                                }
-                            },
-                            label = { Text("Number") },
-                            placeholder = { Text("12345") },
-                            singleLine = true,
-                            enabled = judgeIsActive,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.width(96.dp)
-                        )
-                    }
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Checkbox(
-                        checked = onlyOneScorekeeperToday,
-                        onCheckedChange = { onlyOneScorekeeperToday = it }
-                    )
-                    Text("Only one ScoreKeeper/TimeKeeper today")
-                }
-
-                SignatureEntryField(
-                    label = "Scorekeeper",
-                    value = scorekeeperSignature,
-                    enabled = true,
-                    onNameChanged = { scorekeeperSignature = scorekeeperSignature.copy(name = capitalizeWords(it)) },
-                    onRankChanged = { scorekeeperSignature = scorekeeperSignature.copy(rank = it) },
-                    onNumberChanged = {
-                        scorekeeperSignature = scorekeeperSignature.copy(number = it.filter { ch -> ch.isDigit() }.take(6))
-                    }
-                )
-                SignatureEntryField(
-                    label = "Timekeeper",
-                    value = timekeeperSignature,
-                    enabled = !onlyOneScorekeeperToday,
-                    onNameChanged = { timekeeperSignature = timekeeperSignature.copy(name = capitalizeWords(it)) },
-                    onRankChanged = { timekeeperSignature = timekeeperSignature.copy(rank = it) },
-                    onNumberChanged = {
-                        timekeeperSignature = timekeeperSignature.copy(number = it.filter { ch -> ch.isDigit() }.take(6))
-                    }
-                )
-            }
-        }
         Spacer(modifier = Modifier.height(120.dp))
-    }
-}
-
-@Composable
-private fun SignatureEntryField(
-    label: String,
-    value: SignatureEntry,
-    enabled: Boolean = true,
-    onNameChanged: (String) -> Unit,
-    onRankChanged: (String) -> Unit,
-    onNumberChanged: (String) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        OutlinedTextField(
-            value = value.name,
-            onValueChange = { onNameChanged(capitalizeWords(it)) },
-            label = { Text(label) },
-            singleLine = true,
-            enabled = enabled,
-            textStyle = androidx.compose.ui.text.TextStyle(fontFamily = signatureFontFamily, fontSize = 28.sp),
-            modifier = Modifier.weight(1.15f)
-        )
-        SignatureRankDropdown(
-            value = value.rank,
-            enabled = enabled,
-            onValueChange = onRankChanged,
-            modifier = Modifier.weight(0.55f)
-        )
-        OutlinedTextField(
-            value = value.number,
-            onValueChange = { onNumberChanged(it.filter { ch -> ch.isDigit() }.take(6)) },
-            label = { Text("Number") },
-            placeholder = { Text("12345") },
-            singleLine = true,
-            enabled = enabled,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.width(96.dp)
-        )
-    }
-}
-
-private fun SignatureEntry.toJson(): JSONObject {
-    return JSONObject().apply {
-        put("name", name)
-        put("rank", rank)
-        put("number", number)
-        put("dan", listOf(rank, number).filter { it.isNotBlank() }.joinToString(" "))
     }
 }
 
@@ -5426,25 +5271,8 @@ private fun buildDivisionPacketJson(
     hyungsPlacementsByCompetitorId: Map<String, String>,
     weaponsTieBreakDetailsByCompetitorId: Map<String, String>,
     hyungsTieBreakDetailsByCompetitorId: Map<String, String>,
-    judgeSignatures: List<SignatureEntry>,
-    scorekeeperSignature: SignatureEntry,
-    timekeeperSignature: SignatureEntry,
-    onlyOneScorekeeperToday: Boolean,
     completedAt: String
 ): JSONObject {
-    val activeJudges = judgeSignatures.filter {
-        it.name.isNotBlank() || it.rank.isNotBlank() || it.number.isNotBlank()
-    }
-    val centerJudgeIndex = if (activeJudges.isEmpty()) 0 else activeJudges.size / 2
-    val centerJudge = activeJudges.getOrNull(centerJudgeIndex)
-    val cornerJudges = JSONArray().apply {
-        activeJudges.forEachIndexed { index, signature ->
-            if (index != centerJudgeIndex) {
-                put(signature.toJson())
-            }
-        }
-    }
-
     return JSONObject().apply {
         put("groupId", groupId)
         put("groupDivisionNumber", groupDivisionNumber)
@@ -5468,18 +5296,6 @@ private fun buildDivisionPacketJson(
                     put("generatedAt", completedAt)
                     put("completedAt", completedAt)
                 })
-                put(
-                    "judgeNames",
-                    JSONObject().apply {
-                        put("centerJudge", centerJudge?.toJson())
-                        put("cornerJudges", cornerJudges)
-                        put("operator", JSONObject().apply {
-                            put("scorekeeper", scorekeeperSignature.toJson())
-                            put("timekeeper", timekeeperSignature.toJson())
-                            put("singleOperator", onlyOneScorekeeperToday)
-                        })
-                    }
-                )
                 put(
                     "competitors",
                     JSONArray().apply {
@@ -5520,21 +5336,6 @@ private fun buildDivisionPacketJson(
                 )
             }
         )
-        put(
-            "signatureBlock",
-            JSONObject().apply {
-                put("centerJudge", centerJudge?.toJson())
-                put("cornerJudges", cornerJudges)
-                put(
-                    "operator",
-                    JSONObject().apply {
-                        put("scorekeeper", scorekeeperSignature.toJson())
-                        put("timekeeper", timekeeperSignature.toJson())
-                        put("singleOperator", onlyOneScorekeeperToday)
-                    }
-                )
-            }
-        )
     }
 }
 
@@ -5556,10 +5357,6 @@ private fun buildSummarySheetSnapshot(
     hyungsPlacementsByCompetitorId: Map<String, String>,
     hyungsTieBreakDetailsByCompetitorId: Map<String, String>,
     sparringReviewLines: List<String>,
-    judgeSignatures: List<SignatureEntry>,
-    scorekeeperSignature: SignatureEntry,
-    timekeeperSignature: SignatureEntry,
-    onlyOneScorekeeperToday: Boolean,
     completedAt: String
 ): Pair<ByteArray, String> {
     val lines = buildSummarySheetLines(
@@ -5580,10 +5377,6 @@ private fun buildSummarySheetSnapshot(
         hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
         hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
         sparringReviewLines = sparringReviewLines,
-        judgeSignatures = judgeSignatures,
-        scorekeeperSignature = scorekeeperSignature,
-        timekeeperSignature = timekeeperSignature,
-        onlyOneScorekeeperToday = onlyOneScorekeeperToday,
         completedAt = completedAt
     )
 
@@ -5612,10 +5405,6 @@ private fun buildSummarySheetLines(
     hyungsPlacementsByCompetitorId: Map<String, String>,
     hyungsTieBreakDetailsByCompetitorId: Map<String, String>,
     sparringReviewLines: List<String>,
-    judgeSignatures: List<SignatureEntry>,
-    scorekeeperSignature: SignatureEntry,
-    timekeeperSignature: SignatureEntry,
-    onlyOneScorekeeperToday: Boolean,
     completedAt: String
 ): List<String> {
     fun formatScorePairs(scores: List<String>): String {
@@ -5684,13 +5473,6 @@ private fun buildSummarySheetLines(
         }
     }
     lines += ""
-    lines += "Judges"
-    judgeSignatures.forEachIndexed { index, signature ->
-        val rankNumber = listOf(signature.rank, signature.number).filter { it.isNotBlank() }.joinToString(" ")
-        lines += "  Judge ${index + 1}: ${signature.name} $rankNumber".trimEnd()
-    }
-    lines += "  Operator: ${scorekeeperSignature.name}/${timekeeperSignature.name}${if (onlyOneScorekeeperToday) " (single)" else ""}"
-    lines += ""
     lines += "Sparring Review"
     if (sparringReviewLines.isEmpty()) {
         lines += "  No sparring review lines."
@@ -5698,58 +5480,6 @@ private fun buildSummarySheetLines(
         lines += sparringReviewLines.map { "  $it" }
     }
     return lines
-}
-
-@Composable
-private fun SignatureRankDropdown(
-    value: String,
-    enabled: Boolean,
-    onValueChange: (String) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var expanded by remember { mutableStateOf(false) }
-
-    Box(modifier = modifier) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = value,
-                onValueChange = {},
-                label = { Text("Rank") },
-                placeholder = { Text("Select") },
-                singleLine = true,
-                enabled = enabled,
-                readOnly = true,
-                modifier = Modifier.weight(1f)
-            )
-            Button(
-                onClick = { if (enabled) expanded = !expanded },
-                enabled = enabled,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 12.dp)
-            ) {
-                Text("▼")
-            }
-        }
-        DropdownMenu(
-            expanded = expanded && enabled,
-            onDismissRequest = { expanded = false }
-        ) {
-            signatureRankOptions.forEach { option ->
-                DropdownMenuItem(
-                    text = { Text(option) },
-                    onClick = {
-                        onValueChange(option)
-                        expanded = false
-                    }
-                )
-            }
-        }
-    }
-}
-
-private fun isCompleteSignatureEntry(entry: SignatureEntry): Boolean {
-    return entry.name.isNotBlank() &&
-        entry.rank.isNotBlank() &&
-        entry.number.length in 5..6
 }
 
 private fun wrapSnapshotText(text: String, paint: Paint, maxWidth: Float): List<String> {
@@ -6004,10 +5734,6 @@ private fun buildDivisionResultPacketBuildRequest(
     sparringRound0Bouts: List<com.summ0.tournamentscoringapp.engine.SparringBout>,
     sparringWinners: Map<Int, Map<Int, Competitor>>,
     sparringBoutProgress: Map<String, SparringBoutProgress>,
-    judgeSignatures: List<SignatureEntry>,
-    scorekeeperSignature: SignatureEntry,
-    timekeeperSignature: SignatureEntry,
-    onlyOneScorekeeperToday: Boolean,
     completedAt: String
 ): DivisionResultPacketBuildRequest {
     val divisionNumber = groupBanner.groupDivisionNumber
@@ -6061,7 +5787,7 @@ private fun buildDivisionResultPacketBuildRequest(
             boutProgressByKey = sparringBoutProgress
         ),
         overallAwards = overallAwards,
-        signatures = judgeSignatures + listOf(scorekeeperSignature, timekeeperSignature),
+        signatures = emptyList(),
         tabletLabel = tabletLabel,
         weaponsFinalizeState = weaponsFinalizeState,
         hyungsFinalizeState = hyungsFinalizeState,

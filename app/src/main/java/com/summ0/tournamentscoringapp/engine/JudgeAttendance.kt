@@ -15,7 +15,8 @@ enum class JudgeAttendanceStatus {
 data class PlannedRingJudge(
     val associationId: String,
     val name: String,
-    val assignedRole: String
+    val assignedRole: String,
+    val rank: String = ""
 )
 
 data class JudgeAttendanceEntry(
@@ -23,7 +24,8 @@ data class JudgeAttendanceEntry(
     val name: String,
     val assignedRole: String,
     val status: JudgeAttendanceStatus = JudgeAttendanceStatus.UNCONFIRMED,
-    val markedAt: String = ""
+    val markedAt: String = "",
+    val rank: String = ""
 )
 
 data class RingPhaseJudgeAttendance(
@@ -54,7 +56,8 @@ fun plannedRingJudges(plan: JSONObject): List<PlannedRingJudge> {
             PlannedRingJudge(
                 associationId = associationId,
                 name = judge.optString("name").trim(),
-                assignedRole = role
+                assignedRole = role,
+                rank = judge.optString("rank").trim()
             )
         }
     }
@@ -67,7 +70,7 @@ fun newJudgeAttendance(plan: JSONObject): RingPhaseJudgeAttendance =
         phase = plan.getString("phase"),
         assignmentRevision = plan.getString("assignmentRevision"),
         officials = plannedRingJudges(plan).map {
-            JudgeAttendanceEntry(it.associationId, it.name, it.assignedRole)
+            JudgeAttendanceEntry(it.associationId, it.name, it.assignedRole, rank = it.rank)
         }
     )
 
@@ -106,6 +109,7 @@ fun serializeJudgeAttendance(attendance: RingPhaseJudgeAttendance): JSONObject =
                     put("associationId", official.associationId)
                     put("name", official.name)
                     put("assignedRole", official.assignedRole)
+                    put("rank", official.rank)
                     put("status", official.status.name)
                     put("markedAt", official.markedAt)
                 })
@@ -151,6 +155,46 @@ fun parseJudgeAttendance(root: JSONObject, plan: JSONObject): RingPhaseJudgeAtte
     }
     require(seen == byId.keys) { "Saved attendance does not cover the planned judge roster." }
     return expected.copy(officials = officials)
+}
+
+fun RingPhaseService.withJudgePresence(
+    official: JudgeAttendanceEntry,
+    present: Boolean,
+    at: String = Instant.now().toString()
+): RingPhaseService {
+    if (!present) return unseat(official.associationId, at)
+    if (roleOf(official.associationId) != null) return this
+    val role = requireNotNull(ServiceRole.fromWire(official.assignedRole)) {
+        "The assigned judge role is not recognized."
+    }
+    val capacity = when (role) {
+        ServiceRole.CORNER -> 4
+        ServiceRole.SKTK -> 2
+        else -> 1
+    }
+    require(seats[role].orEmpty().size < capacity) {
+        "${role.label} is already staffed. Record a replacement under Changes."
+    }
+    return seat(role, ServiceJudge(official.associationId, official.name, official.rank), at)
+}
+
+fun RingPhaseService.forDivision(anchor: String): RingPhaseService =
+    if (groupAnchor == anchor) this else copy(groupAnchor = anchor, history = emptyList())
+
+fun attendanceFromService(
+    attendance: RingPhaseJudgeAttendance,
+    service: RingPhaseService,
+    at: String = Instant.now().toString()
+): RingPhaseJudgeAttendance {
+    require(attendance.ringId == service.ringId && attendance.phase == service.phase) {
+        "Judge service belongs to a different ring or phase."
+    }
+    return attendance.officials.fold(attendance) { updated, official ->
+        val present = service.roleOf(official.associationId) != null
+        val status = if (present) JudgeAttendanceStatus.PRESENT else JudgeAttendanceStatus.ABSENT
+        if (official.status == status || !present && official.status == JudgeAttendanceStatus.UNCONFIRMED) updated
+        else updateJudgeAttendance(updated, official.associationId, status, at)
+    }
 }
 
 private fun isValidInstant(value: String): Boolean = try {

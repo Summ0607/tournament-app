@@ -153,6 +153,119 @@ class DivisionStoreTest {
     }
 
     @Test
+    fun presentJudgesCreateServiceBeforeADivisionAndReplacementsCarryForwardAfterRestart() {
+        val plan = JSONObject()
+            .put("type", "tournament-judge-plan").put("schemaVersion", 1)
+            .put("eventName", "Event A").put("ringId", "ring-a-1").put("phase", "P1")
+            .put("assignmentRevision", "revision-1").put("assigned", true)
+            .put("positions", JSONObject()
+                .put("center", org.json.JSONArray().put(JSONObject()
+                    .put("associationId", "D10000").put("name", "Center Judge").put("rank", "D2")))
+                .put("sktk", org.json.JSONArray().put(JSONObject()
+                    .put("associationId", "G20000").put("name", "Scorekeeper").put("rank", "G1"))))
+        val store = DivisionStore(folder.root)
+        val initial = newJudgeAttendance(plan)
+        val present = initial.officials.fold(initial) { attendance, official ->
+            updateJudgeAttendance(attendance, official.associationId, JudgeAttendanceStatus.PRESENT)
+        }
+        val service = store.loadJudgeService(plan, present, "")
+        store.saveJudgeCheckIn(plan, present, service)
+        val reopened = DivisionStore(folder.root)
+        assertEquals(listOf("D2", "G1"), reopened.loadJudgeAttendance(plan)!!.officials.map { it.rank })
+        assertEquals(ServiceRole.SKTK, service.roleOf("G20000"))
+        assertEquals(service, reopened.loadJudgeService(plan, present, ""))
+        assertEquals(service, reopened.loadJudgeService(plan, present, "")
+            .withJudgePresence(present.officials.first(), true))
+
+        reopened.saveDivision(sampleGroup(20), "network")
+        val first = reopened.loadJudgeService(plan, present, "20")
+        assertTrue(first.history.isEmpty())
+        assertEquals(service.seats, first.seats)
+        reopened.saveJudgeCheckIn(plan, present, first)
+        val replaced = first.replace(ServiceRole.CENTER, "D10000",
+            ServiceJudge("D30000", "Relief Judge", "D3"), "revision-1", true)
+        assertThrows(IllegalArgumentException::class.java) {
+            replaced.withJudgePresence(present.officials.first(), true)
+        }
+        val afterReplacement = attendanceFromService(present, replaced)
+        assertEquals(JudgeAttendanceStatus.ABSENT, afterReplacement.officials.first().status)
+        reopened.saveJudgeCheckIn(plan, afterReplacement, replaced)
+
+        val restart = DivisionStore(folder.root)
+        restart.saveDivision(sampleGroup(21), "network")
+        val next = restart.loadJudgeService(plan, restart.loadJudgeAttendance(plan)!!, "21")
+        assertEquals("D30000", next.seats[ServiceRole.CENTER]!!.single().associationId)
+        assertNull(next.roleOf("D10000"))
+        assertTrue(next.history.isEmpty())
+        restart.saveJudgeCheckIn(plan, attendanceFromService(afterReplacement, next), next)
+        val packet = restart.prepareServicePacket("ring-a-1", "P1", "Event A").packet
+        val divisions = packet.getJSONArray("divisions")
+        assertEquals(2, divisions.length())
+        val byAnchor = (0 until divisions.length()).associate {
+            divisions.getJSONObject(it).getString("groupAnchor") to divisions.getJSONObject(it)
+        }
+        assertEquals("D10000", byAnchor.getValue("20").getJSONArray("history")
+            .getJSONObject(0).getString("previousJudgeAssociationId"))
+        assertEquals(0, byAnchor.getValue("21").getJSONArray("history").length())
+        assertNull(restart.loadJudgeAttendance(JSONObject(plan.toString()).put("phase", "P2")))
+    }
+
+    @Test
+    fun uncheckedJudgesDoNotCreateServiceAndLeavingPreservesPriorServiceHistory() {
+        val plan = JSONObject()
+            .put("type", "tournament-judge-plan").put("schemaVersion", 1)
+            .put("eventName", "Event A").put("ringId", "ring-a-1").put("phase", "P1")
+            .put("assignmentRevision", "revision-1").put("assigned", true)
+            .put("positions", JSONObject().put("corner", org.json.JSONArray().put(JSONObject()
+                .put("associationId", "D10000").put("name", "Corner Judge").put("rank", "D2"))))
+        val store = DivisionStore(folder.root)
+        store.saveDivision(sampleGroup(20), "network")
+        val initial = newJudgeAttendance(plan)
+        val empty = store.loadJudgeService(plan, initial, "20")
+        store.saveJudgeCheckIn(plan, initial, empty)
+        assertThrows(IllegalArgumentException::class.java) {
+            store.prepareServicePacket("ring-a-1", "P1", "Event A")
+        }
+        val official = initial.officials.single()
+        val serving = empty.withJudgePresence(official, true, "2026-11-14T12:00:00Z")
+        val left = serving.withJudgePresence(official, false, "2026-11-14T12:30:00Z")
+        store.saveJudgeCheckIn(plan, attendanceFromService(initial, left), left)
+        assertTrue(left.seats.isEmpty())
+        assertEquals(listOf(ServiceAction.SEATED, ServiceAction.REPLACED), left.history.map { it.action })
+        assertEquals("D10000", left.history.last().previousJudgeAssociationId)
+        assertEquals(left, DivisionStore(folder.root).loadJudgeService(plan, initial, "20"))
+        val packet = store.prepareServicePacket("ring-a-1", "P1", "Event A").packet
+        assertEquals(2, packet.getJSONArray("divisions").getJSONObject(0).getJSONArray("history").length())
+        assertThrows(IllegalArgumentException::class.java) {
+            store.saveJudgeCheckIn(plan, initial, serving.copy(ringId = "ring-b-1"))
+        }
+        assertThrows(java.io.IOException::class.java) {
+            store.saveJudgeCheckIn(plan, initial, serving.copy(groupAnchor = "missing"))
+        }
+    }
+
+    @Test
+    fun olderAttendanceWithoutRankRestoresThePlannedRank() {
+        val plan = JSONObject()
+            .put("type", "tournament-judge-plan").put("schemaVersion", 1)
+            .put("eventName", "Event A").put("ringId", "ring-a-1").put("phase", "P1")
+            .put("assignmentRevision", "revision-1").put("assigned", true)
+            .put("positions", JSONObject().put("corner", org.json.JSONArray().put(JSONObject()
+                .put("associationId", "D10000").put("name", "Corner Judge").put("rank", "D2"))))
+        val attendance = newJudgeAttendance(plan)
+        val legacy = serializeJudgeAttendance(attendance)
+        legacy.getJSONArray("officials").getJSONObject(0).remove("rank")
+        assertEquals("D2", parseJudgeAttendance(legacy, plan).officials.single().rank)
+        val store = DivisionStore(folder.root)
+        store.saveDivision(sampleGroup(20), "network")
+        val present = updateJudgeAttendance(parseJudgeAttendance(legacy, plan), "D10000", JudgeAttendanceStatus.PRESENT)
+        store.saveJudgeAttendance(plan, present)
+        store.saveService("20", serializeRingPhaseService(RingPhaseService("ring-a-1", "P1", "20")))
+        val restored = store.loadJudgeService(plan, present, "20")
+        assertEquals("D10000", restored.seats[ServiceRole.CORNER]!!.single().associationId)
+    }
+
+    @Test
     fun statusLifecycleTracksCompletionAndSubmission() {
         val store = DivisionStore(folder.root)
         store.saveDivision(sampleGroup(20), "network")

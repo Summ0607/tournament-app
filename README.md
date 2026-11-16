@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.53 (54)**. The installed version is shown beneath
+This checkpoint is version **1.56 (57)**. The installed version is shown beneath
 the startup heading and in Server Configuration, including compact layouts and
 when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
@@ -51,7 +51,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.53 (54)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.56 (57)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -144,24 +144,36 @@ saved session.
 
 ### Judge service recording
 
-**Judge Service** on the check-in header records who is actually serving the
-loaded division. Choose P1/P2 assignment phase; it is independent of the scoring
-phase. The screen supports seating, replacing a seated judge, swapping a Center
+After a successful ring connection, **Judge Check-In** opens automatically and
+loads the selected P1/P2 assignment plan for that ring. The roster identifies
+the assigned Center, Corner, and SK/TK judges so the operator can confirm
+presence; the phase is independent of the scoring phase. Check-in shows a compact
+Name / Rank code / Dan or Association ID list with one **Present** checkbox.
+Unchecked means absent. Marking Present records service in the planned role;
+no separate seating step is required. **Changes / transfer** opens the optional
+replacement, swap and packet controls instead of crowding the check-in list.
+The screen supports replacing a serving judge, swapping a Center
 and Corner judge, and removing a judge, keeping a timestamped history of every
 `SEATED`/`REPLACED`/`SWAPPED` change alongside the final lineup. Center, corner,
 scorekeeper, timekeeper and arbitrator are distinct actual roles. Division
-histories are stored separately per phase and survive restarts. **Load / refresh
-saved plan** downloads the ring/phase roster, assignment/source revisions, arbitrator
+histories are stored separately per phase and survive restarts. **Refresh** remains available to reload the ring/phase roster,
+assignment/source revisions, arbitrator
 reserves, and hidden event-PIN verification data without changing the server
 plan. The app persists the complete plan by event/ring/phase. It can show the
 saved roster after restart or when the server is unreachable, clearly marking
 that offline copy as potentially stale. The PIN itself is never displayed.
 
 The planned roster also supports attendance confirmation for each assigned
-Center, Corner, and SK/TK judge. Mark each person **Present**, **Absent**, or
-clear the status back to **Unconfirmed**. Attendance is stored locally against
-the assignment revision, survives app restarts, and is not included in division
-results or treated as service experience.
+Center, Corner, and SK/TK judge. Attendance and the current service lineup are
+saved together against the assignment revision and survive app restarts, even
+when no division is loaded yet. The lineup carries into each new division;
+replacement history stays with the division where the change occurred.
+Unchecking a serving judge records their departure rather than erasing prior
+service. Neither attendance nor service is embedded in division results;
+service is transferred separately and reviewed by the coordinator.
+
+Division completion no longer requests judge or staff signatures. Result packets
+retain an empty `signatures` array for server compatibility.
 
 Replacing a seated judge requires selecting the outgoing judge and entering the
 event's four-character PIN. The app verifies it locally against the saved
@@ -177,6 +189,12 @@ Center service credit only.
 
 **Transfer ring-phase service** consolidates all locally stored division
 histories for that ring and phase into one packet with its own submission ID.
+When connected and waiting for the next division, **Judge Check-In** remains
+available. **Finalize phase / upload service** opens the changes and transfer
+controls without loading another division. Select P1 or P2, then choose
+**Transfer service** and confirm only after this ring has finished that phase.
+This finalizes service for that ring and phase, not other rings, and does not
+disconnect the tablet.
 The packet is saved before network transfer; failed or interrupted transfers
 retry with the same ID, and the app records the server receipt durably. A second
 packet for an already acknowledged ring-phase is prevented. The Judge Management
