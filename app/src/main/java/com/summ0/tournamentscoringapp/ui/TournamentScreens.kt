@@ -18,6 +18,7 @@ import java.io.File
 import java.io.ByteArrayOutputStream
 import androidx.activity.ComponentActivity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -104,6 +105,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
@@ -324,6 +327,8 @@ internal fun CheckInScreen(
     var remoteStatus by remember { mutableStateOf("Connect a ring to begin.") }
     var isLoadingGroup by remember { mutableStateOf(false) }
     var isCompletingGroup by remember { mutableStateOf(false) }
+    var completionFeedback by remember(activeDivisionAnchor) { mutableStateOf("") }
+    var completionFeedbackIsError by remember(activeDivisionAnchor) { mutableStateOf(false) }
     var ringConnectionNeedsReconnect by rememberSaveable { mutableStateOf(false) }
     var serverConnectionModeName by rememberSaveable { mutableStateOf(initialServerConnectionConfig.mode.name) }
     var lastDnsName by rememberSaveable {
@@ -1283,101 +1288,127 @@ internal fun CheckInScreen(
         snapshotBytes: ByteArray? = null,
         snapshotMimeType: String? = null
     ) {
+        if (isCompletingGroup) return
+        isCompletingGroup = true
         screenScope.launch {
-            val ringId = currentRingId.trim()
-            if (ringId.isEmpty()) {
-                remoteStatus = "Assign a ring before requesting the next group."
-                return@launch
-            }
+            var serverAccepted = false
+            try {
+                completionFeedbackIsError = false
+                val ringId = currentRingId.trim()
+                if (ringId.isEmpty()) {
+                    completionFeedback = "Cannot complete this division: no ring is connected. Reconnect the ring and try again."
+                    completionFeedbackIsError = true
+                    remoteStatus = completionFeedback
+                    return@launch
+                }
 
-            isCompletingGroup = true
-            val completedDivisionAnchor = activeDivisionAnchor
-            if (completedDivisionAnchor.isNotBlank()) {
-                divisionStore.markCompleted(completedDivisionAnchor)
-            }
-            remoteStatus = "Loading next group: building packet..."
-            val completionTimestamp = Instant.now().toString()
-            appendCurrentPhaseToHistory(completionTimestamp)
-            val completionPhaseHistory = snapshotPhaseHistory()
-            val completionSnapshot = buildCompletionTelemetrySnapshot(
-                ringAssignment = currentRingAssignment,
-                progress = currentHeartbeatProgress,
-                currentPhase = controlBoardPhase,
-                phaseHistory = completionPhaseHistory,
-                checkInCount = checkedInCount,
-                checkInTotal = competitors.size,
-                completedAt = completionTimestamp
-            )
-            val submissionResult = mainViewModel.finalizeAndSubmitResults(
-                serverBaseUrl = serverBaseUrl,
-                request = request,
-                completionSnapshot = completionSnapshot
-            )
-            when (submissionResult) {
-                is DivisionResultSubmissionResult.Accepted -> {
-                    remoteStatus = "Loading next group: saving results..."
-                    markRingConnectionHealthy()
-                    if (completedDivisionAnchor.isNotBlank()) {
-                        divisionStore.markSubmitted(completedDivisionAnchor, submissionResult.response.submissionId)
-                    }
-                    if (snapshotBytes != null && snapshotMimeType != null) {
-                        val receiptPacket = buildFrozenCompletionSubmissionPayload(
-                            serializeDivisionResultPacket(DivisionResultPacketBuilder.build(request)),
-                            completionSnapshot
-                        )
-                        persistDivisionPacketReceipt(
-                            context = appContext,
-                            divisionPacket = receiptPacket,
-                            snapshotBytes = snapshotBytes,
-                            snapshotMimeType = snapshotMimeType
-                        )
-                    }
-
-                    appendCurrentPhaseToHistory(completionTimestamp)
-                    val refreshedAssignment = fetchRingAssignment(
-                        "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/current"
-                    ).assignment
-                    if (refreshedAssignment != null) {
-                        syncAssignmentFromServer(
-                            assignment = refreshedAssignment,
-                            preserveLoadedGroup = false
-                        )
-                        remoteStatus = refreshedAssignment.currentGroup?.let { nextGroup ->
-                            val nextLabel = formatDivisionDisplayLabel(
-                                nextGroup.effectiveDivisionNumber(),
-                                nextGroup.effectiveDivisionName()
+                val completedDivisionAnchor = activeDivisionAnchor
+                if (completedDivisionAnchor.isNotBlank()) {
+                    divisionStore.markCompleted(completedDivisionAnchor)
+                }
+                completionFeedback = "Saving results and uploading. Waiting for the server to acknowledge this division..."
+                remoteStatus = completionFeedback
+                val completionTimestamp = Instant.now().toString()
+                appendCurrentPhaseToHistory(completionTimestamp)
+                val completionPhaseHistory = snapshotPhaseHistory()
+                val completionSnapshot = buildCompletionTelemetrySnapshot(
+                    ringAssignment = currentRingAssignment,
+                    progress = currentHeartbeatProgress,
+                    currentPhase = controlBoardPhase,
+                    phaseHistory = completionPhaseHistory,
+                    checkInCount = checkedInCount,
+                    checkInTotal = competitors.size,
+                    completedAt = completionTimestamp
+                )
+                val submissionResult = mainViewModel.finalizeAndSubmitResults(
+                    serverBaseUrl = serverBaseUrl,
+                    request = request,
+                    completionSnapshot = completionSnapshot
+                )
+                completionFeedback = divisionSubmissionFeedback(submissionResult)
+                completionFeedbackIsError = submissionResult !is DivisionResultSubmissionResult.Accepted
+                when (submissionResult) {
+                    is DivisionResultSubmissionResult.Accepted -> {
+                        serverAccepted = true
+                        remoteStatus = "Loading next group: saving results..."
+                        markRingConnectionHealthy()
+                        if (completedDivisionAnchor.isNotBlank()) {
+                            divisionStore.markSubmitted(completedDivisionAnchor, submissionResult.response.submissionId)
+                        }
+                        if (snapshotBytes != null && snapshotMimeType != null) {
+                            val receiptPacket = buildFrozenCompletionSubmissionPayload(
+                                serializeDivisionResultPacket(DivisionResultPacketBuilder.build(request)),
+                                completionSnapshot
                             )
-                            if (nextGroup.competitors.isNotEmpty()) {
-                                "${refreshedAssignment.ringLabel} advanced to $nextLabel."
-                            } else {
-                                "${refreshedAssignment.ringLabel} is waiting for the next group."
-                            }
-                        } ?: "${refreshedAssignment.ringLabel} is waiting for the next group."
-                    } else {
-                        remoteStatus = "Results uploaded, but the next group could not be refreshed."
-                    }
-                    applyRingContactResult(
-                        sendRingHeartbeat(
-                            serverBaseUrl = serverBaseUrl,
-                            ringId = ringId,
-                            phase = controlBoardPhase,
-                            tabletLabel = tabletLabel,
-                            progress = currentHeartbeatProgress
+                            persistDivisionPacketReceipt(
+                                context = appContext,
+                                divisionPacket = receiptPacket,
+                                snapshotBytes = snapshotBytes,
+                                snapshotMimeType = snapshotMimeType
+                            )
+                        }
+
+                        appendCurrentPhaseToHistory(completionTimestamp)
+                        val refreshedAssignment = fetchRingAssignment(
+                            "${serverBaseUrl.trimEnd('/')}/api/rings/$ringId/current"
+                        ).assignment
+                        if (refreshedAssignment != null) {
+                            syncAssignmentFromServer(
+                                assignment = refreshedAssignment,
+                                preserveLoadedGroup = false
+                            )
+                            remoteStatus = refreshedAssignment.currentGroup?.let { nextGroup ->
+                                val nextLabel = formatDivisionDisplayLabel(
+                                    nextGroup.effectiveDivisionNumber(),
+                                    nextGroup.effectiveDivisionName()
+                                )
+                                if (nextGroup.competitors.isNotEmpty()) {
+                                    "${refreshedAssignment.ringLabel} advanced to $nextLabel."
+                                } else {
+                                    "${refreshedAssignment.ringLabel} is waiting for the next group."
+                                }
+                            } ?: "${refreshedAssignment.ringLabel} is waiting for the next group."
+                        } else {
+                            completionFeedback = "Results accepted by the server, but the next division could not be refreshed. Reconnect the ring; do not complete this division again."
+                            completionFeedbackIsError = true
+                            remoteStatus = completionFeedback
+                        }
+                        applyRingContactResult(
+                            sendRingHeartbeat(
+                                serverBaseUrl = serverBaseUrl,
+                                ringId = ringId,
+                                phase = controlBoardPhase,
+                                tabletLabel = tabletLabel,
+                                progress = currentHeartbeatProgress
+                            )
                         )
-                    )
+                    }
+                    is DivisionResultSubmissionResult.Rejected -> {
+                        remoteStatus = completionFeedback
+                        Log.w(COMPLETE_ROUND_TRACE_TAG, completionFeedback)
+                        if (submissionResult.response.statusCode == 401) showRingPairing = true
+                    }
+                    is DivisionResultSubmissionResult.NetworkFailure -> {
+                        markRingConnectionNeedsReconnect(completionFeedback)
+                        Log.w(COMPLETE_ROUND_TRACE_TAG, completionFeedback)
+                        if (submissionResult.failure.statusCode == 401) showRingPairing = true
+                    }
                 }
-                is DivisionResultSubmissionResult.Rejected -> {
-                    remoteStatus = "Result submission rejected: ${submissionResult.response.errors.joinToString("; ")}"
-                    if (submissionResult.response.statusCode == 401) showRingPairing = true
-                }
-                is DivisionResultSubmissionResult.NetworkFailure -> {
-                    markRingConnectionNeedsReconnect(
-                        submissionResult.failure.message
-                    )
-                    if (submissionResult.failure.statusCode == 401) showRingPairing = true
-                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                completionFeedback = if (serverAccepted) {
+                    "The server accepted the results, but completion could not finish. Do not complete again. " +
+                        "Reconnect the ring or ask the head table for help."
+                } else {
+                    "Completion could not finish. Check the stored results and the head table before trying again; do not clear app storage."
+                } + " Details: ${error.message ?: error.javaClass.simpleName}"
+                completionFeedbackIsError = true
+                remoteStatus = completionFeedback
+                Log.e(COMPLETE_ROUND_TRACE_TAG, completionFeedback, error)
+            } finally {
+                isCompletingGroup = false
             }
-            isCompletingGroup = false
         }
     }
 
@@ -2032,6 +2063,9 @@ internal fun CheckInScreen(
                 winnersByRound = sparringWinners,
                 boutProgressByKey = sparringBoutProgress
             ),
+            completionFeedback = completionFeedback,
+            completionFeedbackIsError = completionFeedbackIsError,
+            isCompleting = isCompletingGroup,
             onCompleteRound = { request, snapshotBytes, snapshotMimeType ->
                 completeCurrentGroup(request, snapshotBytes, snapshotMimeType)
             },
@@ -5033,11 +5067,15 @@ private fun OverallAwardsScreen(
     sparringWinners: Map<Int, Map<Int, Competitor>>,
     sparringBoutProgress: Map<String, SparringBoutProgress>,
     sparringReviewLines: List<String>,
+    completionFeedback: String,
+    completionFeedbackIsError: Boolean,
+    isCompleting: Boolean,
     onCompleteRound: (DivisionResultPacketBuildRequest, ByteArray, String) -> Unit,
     onBackToSparring: () -> Unit,
     onExit: () -> Unit
 ) {
     val scrollState = rememberScrollState()
+    var validationError by remember(groupBanner.groupDivisionNumber) { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -5050,6 +5088,7 @@ private fun OverallAwardsScreen(
         Box(modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = {
+                    validationError = ""
                     val completedAt = Instant.now().toString()
                     Log.d(
                         COMPLETE_ROUND_TRACE_TAG,
@@ -5061,6 +5100,7 @@ private fun OverallAwardsScreen(
                     )
                     val canonicalEventName = activeEventName.trim()
                     if (canonicalEventName.isBlank()) {
+                        validationError = "Cannot complete: the tournament is not identified. Reconnect the ring and try again."
                         Log.w(
                             COMPLETE_ROUND_TRACE_TAG,
                             "Complete Round blocked: unresolved active event for ringId=$ringId"
@@ -5069,67 +5109,90 @@ private fun OverallAwardsScreen(
                     }
                     val activeGroupDivisionNumber = groupBanner.groupDivisionNumber
                     if (activeGroupDivisionNumber == null || activeGroupDivisionNumber <= 0) {
+                        validationError = "Cannot complete: the division number is missing. Reconnect the ring and check the assigned division."
                         Log.w(
                             COMPLETE_ROUND_TRACE_TAG,
                             "Complete Round blocked: unresolved groupDivisionNumber for ringId=$ringId"
                         )
                         return@Button
                     }
-                    val uploadRequest = buildDivisionResultPacketBuildRequest(
-                        groupBanner = groupBanner,
-                        activeEventName = canonicalEventName,
-                        divisionId = divisionId,
-                        divisionType = divisionType,
-                        ringId = ringId,
-                        ringLabel = ringLabel,
-                        tabletLabel = tabletLabel,
-                        divisionCompetitors = divisionCompetitors,
-                        weaponsCompetitors = weaponsCompetitors,
-                        weaponsScoresByCompetitor = weaponsScoresByCompetitor,
-                        weaponsPlacementsByCompetitorId = weaponsPlacementsByCompetitorId,
-                        weaponsTieBreakDetailsByCompetitorId = weaponsTieBreakDetailsByCompetitorId,
-                        weaponsFinalizeState = weaponsFinalizeState,
-                        hyungsCompetitors = hyungsCompetitors,
-                        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
-                        hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
-                        hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
-                        hyungsFinalizeState = hyungsFinalizeState,
-                        sparringRound0Bouts = sparringRound0Bouts,
-                        sparringWinners = sparringWinners,
-                        sparringBoutProgress = sparringBoutProgress,
-                        completedAt = completedAt
-                    )
-                    val snapshot = buildSummarySheetSnapshot(
-                        groupBanner = groupBanner,
-                        divisionId = divisionId,
-                        divisionType = divisionType,
-                        divisionCompetitors = divisionCompetitors,
-                        groupSize = groupSize,
-                        weaponsPlacements = weaponsPlacements,
-                        hyungsPlacements = hyungsPlacements,
-                        sparringPlacements = sparringPlacements,
-                        weaponsCompetitors = weaponsCompetitors,
-                        weaponsScoresByCompetitor = weaponsScoresByCompetitor,
-                        weaponsPlacementsByCompetitorId = weaponsPlacementsByCompetitorId,
-                        weaponsTieBreakDetailsByCompetitorId = weaponsTieBreakDetailsByCompetitorId,
-                        hyungsCompetitors = hyungsCompetitors,
-                        hyungsScoresByCompetitor = hyungsScoresByCompetitor,
-                        hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
-                        hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
-                        sparringReviewLines = sparringReviewLines,
-                        completedAt = completedAt
-                    )
-                    onCompleteRound(uploadRequest, snapshot.first, snapshot.second)
+                    try {
+                        val uploadRequest = buildDivisionResultPacketBuildRequest(
+                            groupBanner = groupBanner,
+                            activeEventName = canonicalEventName,
+                            divisionId = divisionId,
+                            divisionType = divisionType,
+                            ringId = ringId,
+                            ringLabel = ringLabel,
+                            tabletLabel = tabletLabel,
+                            divisionCompetitors = divisionCompetitors,
+                            weaponsCompetitors = weaponsCompetitors,
+                            weaponsScoresByCompetitor = weaponsScoresByCompetitor,
+                            weaponsPlacementsByCompetitorId = weaponsPlacementsByCompetitorId,
+                            weaponsTieBreakDetailsByCompetitorId = weaponsTieBreakDetailsByCompetitorId,
+                            weaponsFinalizeState = weaponsFinalizeState,
+                            hyungsCompetitors = hyungsCompetitors,
+                            hyungsScoresByCompetitor = hyungsScoresByCompetitor,
+                            hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
+                            hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
+                            hyungsFinalizeState = hyungsFinalizeState,
+                            sparringRound0Bouts = sparringRound0Bouts,
+                            sparringWinners = sparringWinners,
+                            sparringBoutProgress = sparringBoutProgress,
+                            completedAt = completedAt
+                        )
+                        val snapshot = buildSummarySheetSnapshot(
+                            groupBanner = groupBanner,
+                            divisionId = divisionId,
+                            divisionType = divisionType,
+                            divisionCompetitors = divisionCompetitors,
+                            groupSize = groupSize,
+                            weaponsPlacements = weaponsPlacements,
+                            hyungsPlacements = hyungsPlacements,
+                            sparringPlacements = sparringPlacements,
+                            weaponsCompetitors = weaponsCompetitors,
+                            weaponsScoresByCompetitor = weaponsScoresByCompetitor,
+                            weaponsPlacementsByCompetitorId = weaponsPlacementsByCompetitorId,
+                            weaponsTieBreakDetailsByCompetitorId = weaponsTieBreakDetailsByCompetitorId,
+                            hyungsCompetitors = hyungsCompetitors,
+                            hyungsScoresByCompetitor = hyungsScoresByCompetitor,
+                            hyungsPlacementsByCompetitorId = hyungsPlacementsByCompetitorId,
+                            hyungsTieBreakDetailsByCompetitorId = hyungsTieBreakDetailsByCompetitorId,
+                            sparringReviewLines = sparringReviewLines,
+                            completedAt = completedAt
+                        )
+                        onCompleteRound(uploadRequest, snapshot.first, snapshot.second)
+                    } catch (error: Exception) {
+                        validationError = "Could not prepare completion. No upload was started. " +
+                            "Details: ${error.message ?: error.javaClass.simpleName}"
+                        Log.e(COMPLETE_ROUND_TRACE_TAG, validationError, error)
+                    }
                 },
+                enabled = !isCompleting,
                 modifier = Modifier.align(Alignment.CenterStart)
             ) {
-                Text("Complete Round")
+                Text(if (isCompleting) "Uploading..." else "Complete Round")
             }
             Button(
                 onClick = onExit,
                 modifier = Modifier.align(Alignment.CenterEnd)
             ) {
                 Text("Exit App")
+            }
+        }
+
+        val feedback = validationError.ifBlank { completionFeedback }
+        if (feedback.isNotBlank()) {
+            val isError = validationError.isNotBlank() || completionFeedbackIsError
+            Surface(
+                modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+                color = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Division completion", fontWeight = FontWeight.SemiBold)
+                    Text(feedback)
+                }
             }
         }
 

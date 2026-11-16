@@ -387,7 +387,8 @@ data class DivisionResultSubmissionAcceptedResponse(
 data class DivisionResultSubmissionRejectedResponse(
     val statusCode: Int,
     val errors: List<String>,
-    val rawBody: String
+    val rawBody: String,
+    val reason: String = ""
 )
 
 data class DivisionResultSubmissionNetworkFailure(
@@ -399,6 +400,31 @@ sealed interface DivisionResultSubmissionResult {
     data class Accepted(val response: DivisionResultSubmissionAcceptedResponse) : DivisionResultSubmissionResult
     data class Rejected(val response: DivisionResultSubmissionRejectedResponse) : DivisionResultSubmissionResult
     data class NetworkFailure(val failure: DivisionResultSubmissionNetworkFailure) : DivisionResultSubmissionResult
+}
+
+internal fun divisionSubmissionFeedback(result: DivisionResultSubmissionResult): String = when (result) {
+    is DivisionResultSubmissionResult.Accepted -> "Results accepted by the server."
+    is DivisionResultSubmissionResult.Rejected -> {
+        val response = result.response
+        val explanation = when (response.reason) {
+            "duplicate-group-result" ->
+                "This division already has an accepted result on the server. " +
+                    "Ask the head table to review it; completing again will not replace that result."
+            "ring-group-mismatch" ->
+                "This division does not match the server's active division for this ring. " +
+                    "Ask the head table to check the ring assignment."
+            else -> response.errors.joinToString("; ").ifBlank { "The server did not accept these results." }
+        }
+        val authorizationHelp = if (response.statusCode == 401 || response.statusCode == 403) {
+            " Scan today's ring QR code to check authorization."
+        } else ""
+        "Upload rejected (HTTP ${response.statusCode}). $explanation$authorizationHelp " +
+            "Your current results remain saved on this tablet and are not marked submitted."
+    }
+    is DivisionResultSubmissionResult.NetworkFailure ->
+        "Upload not confirmed. ${result.failure.message} " +
+            "Your results remain saved on this tablet, but server acceptance has not been confirmed. " +
+            "Check the connection before trying again. Do not clear app storage."
 }
 
 suspend fun submitDivisionResult(
@@ -495,7 +521,8 @@ suspend fun submitDivisionResult(
                     DivisionResultSubmissionRejectedResponse(
                         statusCode = responseCode,
                         errors = errors,
-                        rawBody = responseBody
+                        rawBody = responseBody,
+                        reason = root?.optString("reason").orEmpty()
                     )
                 )
             }

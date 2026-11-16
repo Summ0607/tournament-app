@@ -25,7 +25,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.58 (59)**. The installed version is always shown
+This checkpoint is version **1.59 (60)**. The installed version is always shown
 in a small bottom-right footer on the main screens, including startup, waiting,
 check-in, scoring and results. The footer stays outside scrolling content and
 clear of Android navigation controls. Server Configuration also shows the version,
@@ -53,7 +53,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.58 (59)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.59 (60)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
@@ -138,6 +138,16 @@ reopen the bout after a restart; recorded points and warnings are retained.
 Completing a division marks it `COMPLETED`, and a server acknowledgment marks it
 `SUBMITTED` with the accepted submission id. Stored divisions are retained for
 later use and survive app restarts.
+
+The results screen displays **Division completion** feedback while saving or
+uploading and after an upload is rejected or cannot be confirmed. Rejections
+include the HTTP status and explain duplicate accepted results, ring-assignment
+conflicts, authorization problems, or validation errors. The message distinguishes
+locally saved results from server acceptance and is not overwritten by heartbeats.
+**Complete Round** shows **Uploading...** and is disabled during an attempt.
+Missing tournament/division information is shown instead of silently ignoring
+the tap. This feedback does not automatically overwrite existing server results
+or change the pending-upload/retry workflow.
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionStoreTest`,
 `DivisionSessionTest`).
