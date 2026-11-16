@@ -4,11 +4,20 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import com.summ0.tournamentscoringapp.engine.CompetitionScreen
 import com.summ0.tournamentscoringapp.engine.TabletAuthorization
+import com.summ0.tournamentscoringapp.engine.appVersionLabel
 import com.summ0.tournamentscoringapp.ui.theme.TournamentScoringAppTheme
 
 class MainActivity : ComponentActivity() {
@@ -21,11 +30,24 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             TournamentScoringAppTheme {
-                Scaffold(modifier = androidx.compose.ui.Modifier.fillMaxSize()) { innerPadding ->
-                    CheckInScreen(
-                        initialScreen = initialScreen,
-                        modifier = androidx.compose.ui.Modifier.padding(innerPadding)
-                    )
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    bottomBar = {
+                        Text(
+                            text = appVersionLabel(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .navigationBarsPadding()
+                                .padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.End
+                        )
+                    }
+                ) { innerPadding ->
+                    Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+                        CheckInScreen(initialScreen = initialScreen)
+                    }
                 }
             }
         }

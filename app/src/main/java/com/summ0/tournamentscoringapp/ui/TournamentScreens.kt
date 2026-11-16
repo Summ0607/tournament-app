@@ -2740,12 +2740,6 @@ internal fun LaunchScreenPanel(
                 Text("Exit App")
             }
         }
-        Text(
-            text = appVersionLabel(),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(cardPadding),

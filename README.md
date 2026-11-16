@@ -25,9 +25,11 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.56 (57)**. The installed version is shown beneath
-the startup heading and in Server Configuration, including compact layouts and
-when the server is unreachable. Only the public root certificate is
+This checkpoint is version **1.57 (58)**. The installed version is always shown
+in a small bottom-right footer on the main screens, including startup, waiting,
+check-in, scoring and results. The footer stays outside scrolling content and
+clear of Android navigation controls. Server Configuration also shows the version,
+including compact layouts and when the server is unreachable. Only the public root certificate is
 bundled at `app\src\main\res\raw\tournament_root_ca.pem`; never copy or bundle a
 private key or account database. The bundled PEM file's SHA-256 file hash is
 `0108FF564EFF18C9487422CDBCF36ED951BA947487C566B7B992959FD2706741`.
@@ -51,7 +53,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.56 (57)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.57 (58)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk
