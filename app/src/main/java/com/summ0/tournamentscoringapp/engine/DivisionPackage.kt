@@ -9,7 +9,7 @@ import java.util.zip.Inflater
 const val DIVISION_QR_TYPE = "tournament-division-qr"
 const val DIVISION_PACKAGE_TYPE = "tournament-division-package"
 const val DIVISION_PACKAGE_VERSION = 1
-const val MAX_TABLET_DIVISION_COMPETITORS = 12
+const val MAX_TABLET_DIVISION_COMPETITORS = 13
 private const val CHECKSUM_LENGTH = 16
 
 /** A single division decoded from a self-contained QR code. */

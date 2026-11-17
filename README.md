@@ -165,7 +165,7 @@ Divisions reach the tablet two ways, both producing an identical loaded division
   `GET /api/rings/{ringId}/division-package` and stores the ring's current and
   queued divisions at once.
 
-Both paths cap a division at 12 competitors and persist through the durable
+Both paths cap a division at 13 competitors and persist through the durable
 store, so multiple divisions live on one tablet. **Stored divisions** lists them
 with status and lets the operator open (and resume) any one; opening restores its
 saved session.

@@ -66,6 +66,6 @@ class DivisionPackageTest {
 
     @Test
     fun exposesTabletCompetitorCap() {
-        assertEquals(12, MAX_TABLET_DIVISION_COMPETITORS)
+        assertEquals(13, MAX_TABLET_DIVISION_COMPETITORS)
     }
 }
