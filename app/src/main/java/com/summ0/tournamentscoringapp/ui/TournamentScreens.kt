@@ -13,6 +13,8 @@ import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.os.Build
 import android.os.Bundle
+import android.net.ConnectivityManager
+import android.net.Network
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.ByteArrayOutputStream
@@ -30,7 +32,6 @@ import java.time.Instant
 import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.BackHandler
 import com.journeyapps.barcodescanner.ScanContract
@@ -79,6 +80,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -392,59 +394,25 @@ internal fun CheckInScreen(
     var judgeAttendanceStatus by remember { mutableStateOf("") }
     var isSavingJudgeAttendance by remember { mutableStateOf(false) }
     var judgePlanRequest by remember { mutableStateOf(0) }
-    var pendingServicePacketExport by remember { mutableStateOf("") }
-    val servicePacketExportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
-    ) { uri ->
-        if (uri == null) {
-            serviceTransferStatus = "USB packet export was cancelled. The packet remains saved on this tablet."
-        } else {
-            val payload = pendingServicePacketExport
-            screenScope.launch {
-                try {
-                    withContext(Dispatchers.IO) {
-                        val output = appContext.contentResolver.openOutputStream(uri)
-                            ?: throw IllegalStateException("Unable to open the selected USB destination.")
-                        output.bufferedWriter(Charsets.UTF_8).use { it.write(payload) }
-                    }
-                    serviceTransferStatus = "Service packet saved. Import it in Judge Management, then bring its receipt back here."
-                } catch (error: Exception) {
-                    serviceTransferStatus = error.message ?: "Unable to save the service packet to USB."
-                }
+    var pendingDivisionResultCount by remember { mutableStateOf(0) }
+    var pendingDivisionResultStatus by remember { mutableStateOf("") }
+    var isSyncingDivisionResults by remember { mutableStateOf(false) }
+    suspend fun reconcileSubmittedDivisionResults() {
+        val refreshed = withContext(Dispatchers.IO) {
+            val resultStore = DivisionResultPacketStore(appContext.filesDir)
+            val records = divisionStore.listDivisions()
+            resultStore.listSentPackets().forEach { packet ->
+                val submissionId = packet.optString("submissionId")
+                val groupId = packet.optString("groupId")
+                records
+                    .firstOrNull { it.groupId == groupId }
+                    ?.let { divisionStore.markSubmitted(it.anchor, submissionId) }
             }
+            resultStore.listPending().size to divisionStore.listDivisions()
         }
+        pendingDivisionResultCount = refreshed.first
+        storedDivisionRecords = refreshed.second
     }
-    val serviceReceiptImportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) {
-            screenScope.launch {
-                try {
-                    val receipt = withContext(Dispatchers.IO) {
-                        val input = appContext.contentResolver.openInputStream(uri)
-                            ?: throw IllegalStateException("Unable to open the selected receipt.")
-                        input.bufferedReader(Charsets.UTF_8).use { JSONObject(it.readText()) }
-                    }
-                    val acknowledgement = receipt.optJSONObject("acknowledgement") ?: receipt
-                    val submissionId = acknowledgement.optString("submissionId")
-                    if (!acknowledgement.optBoolean("accepted") || submissionId.isBlank()) {
-                        throw IllegalArgumentException("The selected file is not an accepted service receipt.")
-                    }
-                    val saved = withContext(Dispatchers.IO) {
-                        divisionStore.acknowledgeServicePacket(submissionId, acknowledgement)
-                    }
-                    serviceTransferStatus = if (saved) {
-                        "USB receipt saved for service packet $submissionId."
-                    } else {
-                        "This receipt does not match a pending service packet on this tablet."
-                    }
-                } catch (error: Exception) {
-                    serviceTransferStatus = error.message ?: "Unable to import the service receipt."
-                }
-            }
-        }
-    }
-
     val weaponsSheetCompetitors = remember(competitors, lockedPhases, phaseEntrants) {
         val lockedWeaponsIds = phaseEntrants[CompetitionType.WEAPONS]
         val eligible = if (CompetitionType.WEAPONS in lockedPhases && lockedWeaponsIds != null) {
@@ -482,10 +450,72 @@ internal fun CheckInScreen(
         }
     }
     val judgeCount = if (useOnlyThreeJudges) 3 else 5
-    val nextCompetitionButtonLabel = when {
-        weaponsSheetCompetitors.isNotEmpty() -> "Open Weapons"
-        hyungsSheetCompetitors.isNotEmpty() -> "Open Hyungs"
-        else -> null
+    val sparringBracketSummary = buildSparringBracketSummary(
+        round0Bouts = sparringRound0Bouts,
+        winnersByRound = sparringWinners,
+        competitorCount = sparringCompetitors.size
+    )
+    val weaponsPhaseStarted = CompetitionType.WEAPONS in lockedPhases ||
+        weaponsScoresByCompetitor.values.any { scores -> scores.any(String::isNotBlank) }
+    val hyungsPhaseStarted = CompetitionType.HYUNGS in lockedPhases ||
+        hyungsScoresByCompetitor.values.any { scores -> scores.any(String::isNotBlank) }
+    val sparringPhaseStarted = CompetitionType.SPARRING in lockedPhases ||
+        sparringWinners.isNotEmpty() ||
+        sparringBoutProgress.values.any { it != SparringBoutProgress() }
+    val weaponsPhaseAvailable = weaponsSheetCompetitors.isNotEmpty()
+    val hyungsPhaseAvailable = hyungsSheetCompetitors.isNotEmpty()
+    val sparringPhaseAvailable = sparringCompetitors.isNotEmpty()
+    val phaseProgress = CompetitionPhaseProgress(
+        weapons = CompetitionPhaseStatus(
+            available = weaponsPhaseAvailable,
+            started = weaponsPhaseStarted,
+            complete = !weaponsPhaseAvailable || isPlacementsPhaseFinalized(weaponsFinalizeState)
+        ),
+        hyungs = CompetitionPhaseStatus(
+            available = hyungsPhaseAvailable,
+            started = hyungsPhaseStarted,
+            complete = !hyungsPhaseAvailable || isPlacementsPhaseFinalized(hyungsFinalizeState)
+        ),
+        sparring = CompetitionPhaseStatus(
+            available = sparringPhaseAvailable,
+            started = sparringPhaseStarted,
+            complete = !sparringPhaseAvailable ||
+                sparringBracketSummary.completedBoutCount >= sparringBracketSummary.actualBoutCount
+        )
+    )
+    val completedPhaseScreens = phaseProgress.completedScreens()
+    val canNavigateAwayFromCurrentPhase = phaseProgress.status(currentScreenState.value)?.let {
+        !it.started || it.complete
+    } ?: true
+    val phaseSequence = listOf(
+        CompetitionScreen.WEAPONS_SCORING,
+        CompetitionScreen.HYUNGS_SCORING,
+        CompetitionScreen.SPARRING_BRACKET
+    )
+    fun nextAvailablePhaseAfter(screen: CompetitionScreen): CompetitionScreen {
+        val nextPhase = phaseSequence.dropWhile { it != screen }.drop(1)
+            .firstOrNull { phaseProgress.status(it)?.available == true }
+        return nextPhase ?: CompetitionScreen.OVERALL_AWARDS
+    }
+    val nextCompetitionScreen = phaseSequence.firstOrNull {
+        phaseProgress.status(it)?.available == true &&
+            phaseProgress.status(it)?.complete == false
+    } ?: CompetitionScreen.OVERALL_AWARDS
+    val canOpenAwards = canOpenOverallAwards(phaseProgress)
+    val nextCompetitionButtonEnabled = if (nextCompetitionScreen == CompetitionScreen.OVERALL_AWARDS) {
+        canOpenAwards
+    } else {
+        canNavigateCompetitionPhase(
+            CompetitionScreen.CHECK_IN,
+            nextCompetitionScreen,
+            phaseProgress
+        )
+    }
+    val nextCompetitionButtonLabel = when (nextCompetitionScreen) {
+        CompetitionScreen.WEAPONS_SCORING -> "Open Weapons"
+        CompetitionScreen.HYUNGS_SCORING -> "Open Hyungs"
+        CompetitionScreen.SPARRING_BRACKET -> "Open Sparring"
+        else -> "Open Awards"
     }
     val entrantsSummaryText = "Entrants - Weapons: ${
         phaseEntrantCount(CompetitionType.WEAPONS, phaseEntrants, competitors)
@@ -724,7 +754,7 @@ internal fun CheckInScreen(
     }
 
     suspend fun recoverStoredDivision() {
-        if (currentGroupBanner.isLoaded) return
+        if (currentGroupBanner.isLoaded && competitors.isNotEmpty()) return
         val anchor = withContext(Dispatchers.IO) { divisionStore.activeAnchor() } ?: return
         val stored = withContext(Dispatchers.IO) { divisionStore.loadDivision(anchor) } ?: return
         val sessionJson = withContext(Dispatchers.IO) { divisionStore.loadSession(anchor) }
@@ -740,6 +770,53 @@ internal fun CheckInScreen(
 
     fun refreshStoredDivisions() {
         storedDivisionRecords = divisionStore.listDivisions()
+    }
+
+    fun refreshPendingDivisionResultCount() {
+        screenScope.launch {
+            pendingDivisionResultCount = withContext(Dispatchers.IO) {
+                DivisionResultPacketStore(appContext.filesDir).listPending().size
+            }
+        }
+    }
+
+    suspend fun syncPendingDivisionResults() {
+        if (isSyncingDivisionResults) return
+        isSyncingDivisionResults = true
+        try {
+            val results = mainViewModel.retryPendingSubmissions()
+            val acceptedCount = results.count { it is DivisionResultSubmissionResult.Accepted }
+            reconcileSubmittedDivisionResults()
+            val failure = results.firstOrNull { it !is DivisionResultSubmissionResult.Accepted }
+            pendingDivisionResultStatus = when {
+                failure != null -> "Upload stopped: ${divisionSubmissionFeedback(failure)}"
+                acceptedCount > 0 -> "Server acknowledged $acceptedCount pending division result${if (acceptedCount == 1) "" else "s"}."
+                else -> pendingDivisionResultStatus
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            pendingDivisionResultStatus = error.message ?: "Unable to sync pending division results."
+        } finally {
+            refreshPendingDivisionResultCount()
+            isSyncingDivisionResults = false
+        }
+    }
+
+    DisposableEffect(appContext) {
+        val connectivityManager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                screenScope.launch { syncPendingDivisionResults() }
+            }
+        }
+        connectivityManager.registerDefaultNetworkCallback(callback)
+        onDispose { connectivityManager.unregisterNetworkCallback(callback) }
+    }
+
+    LaunchedEffect(appContext) {
+        refreshPendingDivisionResultCount()
+        syncPendingDivisionResults()
     }
 
     fun loadStoredDivision(anchor: String) {
@@ -1044,53 +1121,39 @@ internal fun CheckInScreen(
         }
     }
 
-    fun exportJudgeServicePacketToUsb() {
-        val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
-        if (ringId.isBlank()) {
-            serviceTransferStatus = "Authorize a ring before exporting service."
-            return
-        }
-        val eventName = TabletAuthorization.event()
-        if (eventName.isNullOrBlank()) {
-            serviceTransferStatus = "Pair this tablet with a tournament before exporting service."
-            return
-        }
-        val phase = currentService?.phase ?: judgeServicePhase
-        screenScope.launch {
-            try {
-                val stored = withContext(Dispatchers.IO) {
-                    divisionStore.prepareServicePacket(ringId, phase, eventName)
-                }
-                if (stored.acknowledgement != null) {
-                    serviceTransferStatus = "This service packet is already acknowledged by the server."
-                    return@launch
-                }
-                val envelope = JSONObject().apply {
-                    put("type", "tournament-judge-service-transfer")
-                    put("schemaVersion", 1)
-                    put("eventName", eventName)
-                    put("packet", stored.packet)
-                }
-                pendingServicePacketExport = envelope.toString(2)
-                servicePacketExportLauncher.launch("judge-service-$ringId-${phase}-${stored.packet.optString("submissionId")}.json")
-            } catch (error: Exception) {
-                serviceTransferStatus = error.message ?: "Unable to prepare the service packet for USB."
-            }
-        }
-    }
-
-    fun selectServiceReceiptFromUsb() {
-        serviceReceiptImportLauncher.launch(arrayOf("application/json", "text/plain"))
-    }
-
     fun moveToScreen(nextScreen: CompetitionScreen, resetControlBoardPhase: Boolean = false) {
+        if (!canNavigateCompetitionPhase(currentScreenState.value, nextScreen, phaseProgress)) return
         currentScreenState.value = nextScreen
         if (nextScreen == CompetitionScreen.CHECK_IN) {
             if (resetControlBoardPhase) {
                 resetControlBoardPhaseHistory("setup")
             }
-        } else {
+        } else if (phaseProgress.status(nextScreen)?.let { it.available && it.complete } != true) {
             transitionControlBoardPhase(screenPhase(nextScreen))
+        }
+    }
+
+    val activeIncompletePhase = phaseSequence.firstOrNull { phase ->
+        phaseProgress.status(phase)?.let { it.started && !it.complete } == true
+    }
+    val restoredScreen = currentScreenState.value
+    val safeNextCompetitionScreen = if (
+        nextCompetitionScreen == CompetitionScreen.OVERALL_AWARDS && !canOpenAwards
+    ) {
+        CompetitionScreen.CHECK_IN
+    } else {
+        nextCompetitionScreen
+    }
+    val validRestoredScreen = activeIncompletePhase
+        ?: if (canNavigateCompetitionPhase(CompetitionScreen.CHECK_IN, restoredScreen, phaseProgress)) {
+            restoredScreen
+        } else {
+            safeNextCompetitionScreen
+        }
+    LaunchedEffect(phaseProgress, restoredScreen) {
+        if (currentScreenState.value != validRestoredScreen) {
+            currentScreenState.value = validRestoredScreen
+            transitionControlBoardPhase(screenPhase(validRestoredScreen))
         }
     }
 
@@ -1303,9 +1366,6 @@ internal fun CheckInScreen(
                 }
 
                 val completedDivisionAnchor = activeDivisionAnchor
-                if (completedDivisionAnchor.isNotBlank()) {
-                    divisionStore.markCompleted(completedDivisionAnchor)
-                }
                 completionFeedback = "Saving results and uploading. Waiting for the server to acknowledge this division..."
                 remoteStatus = completionFeedback
                 val completionTimestamp = Instant.now().toString()
@@ -1323,7 +1383,12 @@ internal fun CheckInScreen(
                 val submissionResult = mainViewModel.finalizeAndSubmitResults(
                     serverBaseUrl = serverBaseUrl,
                     request = request,
-                    completionSnapshot = completionSnapshot
+                    completionSnapshot = completionSnapshot,
+                    onPacketSaved = {
+                        if (completedDivisionAnchor.isNotBlank()) {
+                            divisionStore.markCompleted(completedDivisionAnchor)
+                        }
+                    }
                 )
                 completionFeedback = divisionSubmissionFeedback(submissionResult)
                 completionFeedbackIsError = submissionResult !is DivisionResultSubmissionResult.Accepted
@@ -1335,9 +1400,15 @@ internal fun CheckInScreen(
                         if (completedDivisionAnchor.isNotBlank()) {
                             divisionStore.markSubmitted(completedDivisionAnchor, submissionResult.response.submissionId)
                         }
+                        reconcileSubmittedDivisionResults()
                         if (snapshotBytes != null && snapshotMimeType != null) {
                             val receiptPacket = buildFrozenCompletionSubmissionPayload(
-                                serializeDivisionResultPacket(DivisionResultPacketBuilder.build(request)),
+                                serializeDivisionResultPacket(
+                                    DivisionResultPacketBuilder.build(
+                                        request,
+                                        submissionResult.response.submissionId
+                                    )
+                                ),
                                 completionSnapshot
                             )
                             persistDivisionPacketReceipt(
@@ -1389,7 +1460,20 @@ internal fun CheckInScreen(
                         if (submissionResult.response.statusCode == 401) showRingPairing = true
                     }
                     is DivisionResultSubmissionResult.NetworkFailure -> {
-                        markRingConnectionNeedsReconnect(completionFeedback)
+                        currentScreenState.value = CompetitionScreen.CHECK_IN
+                        completionFeedback =
+                            "Division completed and saved on this tablet. ${submissionResult.failure.message} " +
+                                "You may load another division by QR; its result will remain queued behind this one. " +
+                                "Pending results retry when connectivity returns; " +
+                                "a server rejection must be resolved before later results can upload."
+                        completionFeedbackIsError = false
+                        pendingDivisionResultStatus = completionFeedback
+                        refreshPendingDivisionResultCount()
+                        if (submissionResult.failure.statusCode == null || submissionResult.failure.statusCode >= 500) {
+                            markRingConnectionNeedsReconnect("Results are saved locally. Reconnect when the network is available.")
+                        } else {
+                            remoteStatus = completionFeedback
+                        }
                         Log.w(COMPLETE_ROUND_TRACE_TAG, completionFeedback)
                         if (submissionResult.failure.statusCode == 401) showRingPairing = true
                     }
@@ -1515,8 +1599,6 @@ internal fun CheckInScreen(
             transferStatus = serviceTransferStatus,
             isTransferring = isSubmittingService,
             onSubmit = { submitJudgeServicePacket() },
-            onExportUsb = { exportJudgeServicePacketToUsb() },
-            onImportUsbReceipt = { selectServiceReceiptFromUsb() },
             onDismiss = {
                 showJudgeServiceDialog = false
                 openJudgeServiceChanges = false
@@ -1732,20 +1814,39 @@ internal fun CheckInScreen(
     }
 
     if (currentScreenState.value == CompetitionScreen.WEAPONS_SCORING) {
+        val nextPhase = nextAvailablePhaseAfter(CompetitionScreen.WEAPONS_SCORING)
         WeaponsScoringScreen(
             groupBanner = currentGroupBanner,
             competitors = weaponsSheetCompetitors,
             scoresByCompetitor = weaponsScoresByCompetitor,
             placementState = weaponsFinalizeState,
             judgeCount = judgeCount,
+            isReadOnly = phaseProgress.weapons.available && phaseProgress.weapons.complete,
+            completedPhases = completedPhaseScreens,
+            canNavigateAway = canNavigateAwayFromCurrentPhase,
+            onNavigateToPhase = { moveToScreen(it) },
             onBack = { moveToScreen(CompetitionScreen.CHECK_IN) },
-            onNext = { moveToScreen(CompetitionScreen.HYUNGS_SCORING) },
+            onBackEnabled = canNavigateCompetitionPhase(
+                CompetitionScreen.WEAPONS_SCORING,
+                CompetitionScreen.CHECK_IN,
+                phaseProgress
+            ),
+            onNext = { moveToScreen(nextPhase) },
+            onNextLabel = "Next: ${competitionPhaseLabel(nextPhase)}",
+            onNextEnabled = canNavigateCompetitionPhase(
+                CompetitionScreen.WEAPONS_SCORING,
+                nextPhase,
+                phaseProgress
+            ),
             onExit = { requestExitApp() },
             onScoreChanged = { competitorId, judgeIndex, rawValue ->
                 val sanitized = rawValue.filter { it.isDigit() || it == '.' }.take(4)
                 val existing = weaponsScoresByCompetitor[competitorId] ?: List(5) { "" }
                 val updated = existing.toMutableList()
-                updated[judgeIndex] = sanitized
+                updated[judgeIndex] = normalizeJudgeScoreInput(
+                    existing.getOrElse(judgeIndex) { "" },
+                    sanitized
+                )
                 weaponsScoresByCompetitor[competitorId] = updated
                 weaponsFinalizeState = PlacementFinalizeState()
                 weaponsTieBreakScoresByCompetitor.clear()
@@ -1754,7 +1855,7 @@ internal fun CheckInScreen(
                     pendingTieBreak = null
                 }
 
-                if (CompetitionType.WEAPONS !in lockedPhases && calculateScoreTotal(updated) != null) {
+                if (CompetitionType.WEAPONS !in lockedPhases && updated[judgeIndex].isNotBlank()) {
                     lockedPhases = lockedPhases + CompetitionType.WEAPONS
                     phaseEntrants = phaseEntrants + (
                         CompetitionType.WEAPONS to entrantsForPhase(competitors, CompetitionType.WEAPONS)
@@ -1806,7 +1907,10 @@ internal fun CheckInScreen(
                     onScoreChanged = { competitorId, judgeIndex, value ->
                         val existing = weaponsTieBreakScoresByCompetitor[competitorId] ?: List(request.judgeCount) { "" }
                         val updated = existing.toMutableList()
-                        updated[judgeIndex] = value.filter { it.isDigit() || it == '.' }.take(4)
+                        updated[judgeIndex] = normalizeJudgeScoreInput(
+                            existing.getOrElse(judgeIndex) { "" },
+                            value
+                        )
                         weaponsTieBreakScoresByCompetitor[competitorId] = updated
                     },
                     onJudgeSelectionChanged = { judgeIndex, competitorId ->
@@ -1853,21 +1957,39 @@ internal fun CheckInScreen(
     }
 
     if (currentScreenState.value == CompetitionScreen.HYUNGS_SCORING) {
+        val nextPhase = nextAvailablePhaseAfter(CompetitionScreen.HYUNGS_SCORING)
         HyungsScoringScreen(
             groupBanner = currentGroupBanner,
             competitors = hyungsSheetCompetitors,
             scoresByCompetitor = hyungsScoresByCompetitor,
             placementState = hyungsFinalizeState,
             judgeCount = judgeCount,
+            isReadOnly = phaseProgress.hyungs.available && phaseProgress.hyungs.complete,
+            completedPhases = completedPhaseScreens,
+            canNavigateAway = canNavigateAwayFromCurrentPhase,
+            onNavigateToPhase = { moveToScreen(it) },
             onBack = { moveToScreen(CompetitionScreen.CHECK_IN) },
+            onBackEnabled = canNavigateCompetitionPhase(
+                CompetitionScreen.HYUNGS_SCORING,
+                CompetitionScreen.CHECK_IN,
+                phaseProgress
+            ),
             onPrevious = { moveToScreen(CompetitionScreen.CHECK_IN) },
-            onNext = { moveToScreen(CompetitionScreen.SPARRING_BRACKET) },
+            onNext = { moveToScreen(nextPhase) },
+            onNextLabel = "Next: ${competitionPhaseLabel(nextPhase)}",
+            onNextEnabled = canNavigateCompetitionPhase(
+                CompetitionScreen.HYUNGS_SCORING,
+                nextPhase,
+                phaseProgress
+            ),
             onExit = { requestExitApp() },
             onScoreChanged = { competitorId, judgeIndex, rawValue ->
-                val sanitized = rawValue.filter { it.isDigit() || it == '.' }.take(4)
                 val existing = hyungsScoresByCompetitor[competitorId] ?: List(5) { "" }
                 val updated = existing.toMutableList()
-                updated[judgeIndex] = sanitized
+                updated[judgeIndex] = normalizeJudgeScoreInput(
+                    existing.getOrElse(judgeIndex) { "" },
+                    rawValue
+                )
                 hyungsScoresByCompetitor[competitorId] = updated
                 hyungsFinalizeState = PlacementFinalizeState()
                 hyungsTieBreakScoresByCompetitor.clear()
@@ -1876,7 +1998,7 @@ internal fun CheckInScreen(
                     pendingTieBreak = null
                 }
 
-                if (CompetitionType.HYUNGS !in lockedPhases && calculateScoreTotal(updated) != null) {
+                if (CompetitionType.HYUNGS !in lockedPhases && updated[judgeIndex].isNotBlank()) {
                     lockedPhases = lockedPhases + CompetitionType.HYUNGS
                     phaseEntrants = phaseEntrants + (
                         CompetitionType.HYUNGS to entrantsForPhase(competitors, CompetitionType.HYUNGS)
@@ -1928,7 +2050,10 @@ internal fun CheckInScreen(
                     onScoreChanged = { competitorId, judgeIndex, value ->
                         val existing = hyungsTieBreakScoresByCompetitor[competitorId] ?: List(request.judgeCount) { "" }
                         val updated = existing.toMutableList()
-                        updated[judgeIndex] = value.filter { it.isDigit() || it == '.' }.take(4)
+                        updated[judgeIndex] = normalizeJudgeScoreInput(
+                            existing.getOrElse(judgeIndex) { "" },
+                            value
+                        )
                         hyungsTieBreakScoresByCompetitor[competitorId] = updated
                     },
                     onJudgeSelectionChanged = { judgeIndex, competitorId ->
@@ -1980,9 +2105,23 @@ internal fun CheckInScreen(
             competitors = sparringCompetitors,
             winners = sparringWinners,
             boutProgressByKey = sparringBoutProgress,
+            isReadOnly = phaseProgress.sparring.available && phaseProgress.sparring.complete,
+            completedPhases = completedPhaseScreens,
+            canNavigateAway = canNavigateAwayFromCurrentPhase,
+            onNavigateToPhase = { moveToScreen(it) },
             onBack = { moveToScreen(CompetitionScreen.CHECK_IN) },
+            onBackEnabled = canNavigateCompetitionPhase(
+                CompetitionScreen.SPARRING_BRACKET,
+                CompetitionScreen.CHECK_IN,
+                phaseProgress
+            ),
             onPrevious = { moveToScreen(CompetitionScreen.CHECK_IN) },
             onNext = { moveToScreen(CompetitionScreen.OVERALL_AWARDS) },
+            onNextEnabled = canNavigateCompetitionPhase(
+                CompetitionScreen.SPARRING_BRACKET,
+                CompetitionScreen.OVERALL_AWARDS,
+                phaseProgress
+            ),
             onExit = { requestExitApp() },
             onOpenBout = { roundIndex, boutIndex, bout ->
                 activeSparringBout = ActiveSparringBout(
@@ -2000,6 +2139,15 @@ internal fun CheckInScreen(
                 onDismiss = { activeSparringBout = null },
                 onSave = { progress ->
                     sparringBoutProgress[boutKey] = progress
+                    if (
+                        progress != SparringBoutProgress() &&
+                        CompetitionType.SPARRING !in lockedPhases
+                    ) {
+                        lockedPhases = lockedPhases + CompetitionType.SPARRING
+                        phaseEntrants = phaseEntrants + (
+                            CompetitionType.SPARRING to entrantsForPhase(competitors, CompetitionType.SPARRING)
+                            )
+                    }
                     val winner = activeBout.bout.blue.competitor?.takeIf { it.id == progress.winnerId }
                         ?: activeBout.bout.red.competitor?.takeIf { it.id == progress.winnerId }
                     if (winner != null) {
@@ -2007,12 +2155,6 @@ internal fun CheckInScreen(
                         sparringWinners[activeBout.roundIndex] =
                             currentRoundWinners + (activeBout.boutIndex to winner)
 
-                        if (CompetitionType.SPARRING !in lockedPhases) {
-                            lockedPhases = lockedPhases + CompetitionType.SPARRING
-                            phaseEntrants = phaseEntrants + (
-                                CompetitionType.SPARRING to entrantsForPhase(competitors, CompetitionType.SPARRING)
-                                )
-                        }
                     }
                     activeSparringBout = null
                 }
@@ -2066,6 +2208,8 @@ internal fun CheckInScreen(
             completionFeedback = completionFeedback,
             completionFeedbackIsError = completionFeedbackIsError,
             isCompleting = isCompletingGroup,
+            completedPhases = completedPhaseScreens,
+            onNavigateToPhase = { moveToScreen(it) },
             onCompleteRound = { request, snapshotBytes, snapshotMimeType ->
                 completeCurrentGroup(request, snapshotBytes, snapshotMimeType)
             },
@@ -2277,14 +2421,21 @@ internal fun CheckInScreen(
                         connectionActionLabel = connectionActionLabel,
                         onConnectRing = { reconnectCurrentRing() },
                         nextCompetitionButtonLabel = nextCompetitionButtonLabel,
-                        onOpenNextCompetition = {
-                            if (weaponsSheetCompetitors.isNotEmpty()) {
-                                moveToScreen(CompetitionScreen.WEAPONS_SCORING)
-                            } else {
-                                moveToScreen(CompetitionScreen.HYUNGS_SCORING)
-                            }
-                        },
+                        nextCompetitionButtonEnabled = nextCompetitionButtonEnabled,
+                        onOpenNextCompetition = { moveToScreen(nextCompetitionScreen) },
                         onOpenJudgeService = { showJudgeServiceDialog = true },
+                        onScanDivisionQr = { showDivisionQrScanner = true },
+                        storedDivisionCount = storedDivisionRecords.size,
+                        onOpenStoredDivisions = {
+                            refreshStoredDivisions()
+                            showStoredDivisions = true
+                        },
+                        pendingDivisionResultCount = pendingDivisionResultCount,
+                        pendingDivisionResultStatus = pendingDivisionResultStatus,
+                        isSyncingDivisionResults = isSyncingDivisionResults,
+                        onRetryDivisionResults = { screenScope.launch { syncPendingDivisionResults() } },
+                        completedPhases = completedPhaseScreens,
+                        onNavigateToPhase = { moveToScreen(it) },
                         entrantsSummaryText = entrantsSummaryText,
                         ringAssignment = currentRingAssignment,
                         dense = true,
@@ -2363,14 +2514,21 @@ internal fun CheckInScreen(
                         connectionActionLabel = connectionActionLabel,
                         onConnectRing = { reconnectCurrentRing() },
                         nextCompetitionButtonLabel = nextCompetitionButtonLabel,
-                        onOpenNextCompetition = {
-                            if (weaponsSheetCompetitors.isNotEmpty()) {
-                                moveToScreen(CompetitionScreen.WEAPONS_SCORING)
-                            } else {
-                                moveToScreen(CompetitionScreen.HYUNGS_SCORING)
-                            }
-                        },
+                        nextCompetitionButtonEnabled = nextCompetitionButtonEnabled,
+                        onOpenNextCompetition = { moveToScreen(nextCompetitionScreen) },
                         onOpenJudgeService = { showJudgeServiceDialog = true },
+                        onScanDivisionQr = { showDivisionQrScanner = true },
+                        storedDivisionCount = storedDivisionRecords.size,
+                        onOpenStoredDivisions = {
+                            refreshStoredDivisions()
+                            showStoredDivisions = true
+                        },
+                        pendingDivisionResultCount = pendingDivisionResultCount,
+                        pendingDivisionResultStatus = pendingDivisionResultStatus,
+                        isSyncingDivisionResults = isSyncingDivisionResults,
+                        onRetryDivisionResults = { screenScope.launch { syncPendingDivisionResults() } },
+                        completedPhases = completedPhaseScreens,
+                        onNavigateToPhase = { moveToScreen(it) },
                         entrantsSummaryText = entrantsSummaryText,
                         ringAssignment = currentRingAssignment,
                         dense = true,
@@ -2451,14 +2609,21 @@ internal fun CheckInScreen(
                         connectionActionLabel = connectionActionLabel,
                         onConnectRing = { reconnectCurrentRing() },
                         nextCompetitionButtonLabel = nextCompetitionButtonLabel,
-                        onOpenNextCompetition = {
-                            if (weaponsSheetCompetitors.isNotEmpty()) {
-                                moveToScreen(CompetitionScreen.WEAPONS_SCORING)
-                            } else {
-                                moveToScreen(CompetitionScreen.HYUNGS_SCORING)
-                            }
-                        },
+                        nextCompetitionButtonEnabled = nextCompetitionButtonEnabled,
+                        onOpenNextCompetition = { moveToScreen(nextCompetitionScreen) },
                         onOpenJudgeService = { showJudgeServiceDialog = true },
+                        onScanDivisionQr = { showDivisionQrScanner = true },
+                        storedDivisionCount = storedDivisionRecords.size,
+                        onOpenStoredDivisions = {
+                            refreshStoredDivisions()
+                            showStoredDivisions = true
+                        },
+                        pendingDivisionResultCount = pendingDivisionResultCount,
+                        pendingDivisionResultStatus = pendingDivisionResultStatus,
+                        isSyncingDivisionResults = isSyncingDivisionResults,
+                        onRetryDivisionResults = { screenScope.launch { syncPendingDivisionResults() } },
+                        completedPhases = completedPhaseScreens,
+                        onNavigateToPhase = { moveToScreen(it) },
                         entrantsSummaryText = entrantsSummaryText,
                         ringAssignment = currentRingAssignment,
                         dense = denseCheckInLayout,
@@ -2550,6 +2715,60 @@ private fun randomizeScoringSheetCompetitors(
     return competitors.shuffled(Random(seed))
 }
 
+private val REVIEWABLE_COMPETITION_PHASES = listOf(
+    CompetitionScreen.WEAPONS_SCORING,
+    CompetitionScreen.HYUNGS_SCORING,
+    CompetitionScreen.SPARRING_BRACKET
+)
+
+private fun competitionPhaseLabel(screen: CompetitionScreen): String = when (screen) {
+    CompetitionScreen.WEAPONS_SCORING -> "Weapons"
+    CompetitionScreen.HYUNGS_SCORING -> "Hyungs"
+    CompetitionScreen.SPARRING_BRACKET -> "Sparring"
+    CompetitionScreen.OVERALL_AWARDS -> "Awards"
+    CompetitionScreen.CHECK_IN -> "Check-In"
+}
+
+@Composable
+private fun PhaseReviewNavigation(
+    currentScreen: CompetitionScreen,
+    completedPhases: Set<CompetitionScreen>,
+    canNavigate: Boolean,
+    onNavigate: (CompetitionScreen) -> Unit
+) {
+    if (completedPhases.isEmpty() && canNavigate) return
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (completedPhases.isNotEmpty()) {
+            Text("Completed phases (read-only)")
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                REVIEWABLE_COMPETITION_PHASES
+                    .filter { it in completedPhases }
+                    .forEach { phase ->
+                        OutlinedButton(
+                            onClick = { onNavigate(phase) },
+                            enabled = canNavigate && currentScreen != phase
+                        ) {
+                            Text(
+                                if (currentScreen == phase) {
+                                    "${competitionPhaseLabel(phase)} (Here)"
+                                } else {
+                                    "Review ${competitionPhaseLabel(phase)}"
+                                }
+                            )
+                        }
+                    }
+            }
+        }
+        if (!canNavigate) {
+            Text("Finish this phase before changing phases.")
+        }
+    }
+}
+
 @Composable
 private fun CheckInHeaderCard(
     currentGroupBanner: GroupBanner,
@@ -2567,8 +2786,18 @@ private fun CheckInHeaderCard(
     connectionActionLabel: String,
     onConnectRing: () -> Unit,
     nextCompetitionButtonLabel: String?,
+    nextCompetitionButtonEnabled: Boolean,
     onOpenNextCompetition: () -> Unit,
     onOpenJudgeService: (() -> Unit)? = null,
+    onScanDivisionQr: () -> Unit,
+    storedDivisionCount: Int,
+    onOpenStoredDivisions: () -> Unit,
+    pendingDivisionResultCount: Int,
+    pendingDivisionResultStatus: String,
+    isSyncingDivisionResults: Boolean,
+    onRetryDivisionResults: () -> Unit,
+    completedPhases: Set<CompetitionScreen> = emptySet(),
+    onNavigateToPhase: (CompetitionScreen) -> Unit = {},
     entrantsSummaryText: String,
     dense: Boolean,
     modifier: Modifier = Modifier
@@ -2679,6 +2908,12 @@ private fun CheckInHeaderCard(
                 text = entrantsSummaryText,
                 fontSize = bodySize
             )
+            PhaseReviewNavigation(
+                currentScreen = CompetitionScreen.CHECK_IN,
+                completedPhases = completedPhases,
+                canNavigate = true,
+                onNavigate = onNavigateToPhase
+            )
             Row(
                 modifier = if (dense) Modifier else Modifier.horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(if (dense) 6.dp else 8.dp)
@@ -2697,7 +2932,7 @@ private fun CheckInHeaderCard(
                     if (nextCompetitionButtonLabel != null) {
                         Button(
                             onClick = onOpenNextCompetition,
-                            enabled = true,
+                            enabled = nextCompetitionButtonEnabled,
                             contentPadding = actionPadding,
                             modifier = Modifier.height(if (dense) 34.dp else 40.dp)
                         ) {
@@ -2713,6 +2948,47 @@ private fun CheckInHeaderCard(
                         ) {
                             Text("Judge Check-In", fontSize = actionTextSize)
                         }
+                    }
+                }
+                if (currentGroupBanner.isLoaded) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = onScanDivisionQr,
+                            contentPadding = actionPadding,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Scan next division QR", fontSize = actionTextSize)
+                        }
+                        OutlinedButton(
+                            onClick = onOpenStoredDivisions,
+                            contentPadding = actionPadding,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Stored divisions ($storedDivisionCount)", fontSize = actionTextSize)
+                        }
+                    }
+                }
+            }
+            if (pendingDivisionResultCount > 0 || pendingDivisionResultStatus.isNotBlank()) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Pending division results: $pendingDivisionResultCount",
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = bodySize
+                    )
+                    if (pendingDivisionResultStatus.isNotBlank()) {
+                        Text(pendingDivisionResultStatus, fontSize = bodySize)
+                    }
+                    Button(
+                        onClick = onRetryDivisionResults,
+                        enabled = pendingDivisionResultCount > 0 && !isSyncingDivisionResults,
+                        contentPadding = actionPadding,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (isSyncingDivisionResults) "Syncing..." else "Sync now", fontSize = actionTextSize)
                     }
                 }
             }
@@ -3010,8 +3286,6 @@ private fun JudgeServiceDialog(
     transferStatus: String,
     isTransferring: Boolean,
     onSubmit: () -> Unit,
-    onExportUsb: () -> Unit,
-    onImportUsbReceipt: () -> Unit,
     onDismiss: () -> Unit,
     initiallyShowChanges: Boolean = false
 ) {
@@ -3390,18 +3664,6 @@ private fun JudgeServiceDialog(
                 }
                 }
                 if (transferStatus.isNotBlank()) Text(transferStatus, fontSize = 12.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { showTransferConfirmation = true },
-                        enabled = !isTransferring && !isSavingAttendance,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Save packet to USB", fontSize = 12.sp) }
-                    OutlinedButton(
-                        onClick = onImportUsbReceipt,
-                        enabled = !isTransferring && !isSavingAttendance,
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Import USB receipt", fontSize = 12.sp) }
-                }
                 }
             }
         },
@@ -3437,15 +3699,7 @@ private fun JudgeServiceDialog(
                 ) { Text("Transfer online") }
             },
             dismissButton = {
-                Row {
-                    TextButton(
-                        onClick = {
-                            showTransferConfirmation = false
-                            onExportUsb()
-                        }
-                    ) { Text("Save to USB") }
-                    TextButton(onClick = { showTransferConfirmation = false }) { Text("Review") }
-                }
+                TextButton(onClick = { showTransferConfirmation = false }) { Text("Review") }
             }
         )
     }
@@ -3691,7 +3945,7 @@ private fun TieBreakResolutionDialog(
                                     value = inputs.getOrElse(judgeIndex) { "" },
                                     onValueChange = { onScoreChanged(competitor.id, judgeIndex, it) },
                                     singleLine = true,
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                     modifier = Modifier.width(72.dp)
                                 )
                             }
@@ -3787,8 +4041,15 @@ private fun WeaponsScoringScreen(
     scoresByCompetitor: Map<String, List<String>>,
     placementState: PlacementFinalizeState,
     judgeCount: Int,
+    isReadOnly: Boolean,
+    completedPhases: Set<CompetitionScreen>,
+    canNavigateAway: Boolean,
+    onNavigateToPhase: (CompetitionScreen) -> Unit,
     onBack: () -> Unit,
+    onBackEnabled: Boolean,
     onNext: () -> Unit,
+    onNextLabel: String,
+    onNextEnabled: Boolean,
     onExit: () -> Unit,
     onScoreChanged: (competitorId: String, judgeIndex: Int, value: String) -> Unit,
     onFinalizePlacings: () -> Unit
@@ -3809,11 +4070,11 @@ private fun WeaponsScoringScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(onClick = onBack) {
+                Button(onClick = onBack, enabled = onBackEnabled) {
                     Text("Back to Check-In")
                 }
-                Button(onClick = onNext) {
-                    Text("Next: Hyungs")
+                Button(onClick = onNext, enabled = onNextEnabled) {
+                    Text(onNextLabel)
                 }
             }
             Button(
@@ -3823,12 +4084,20 @@ private fun WeaponsScoringScreen(
                 Text("Exit App")
             }
         }
+        PhaseReviewNavigation(
+            currentScreen = CompetitionScreen.WEAPONS_SCORING,
+            completedPhases = completedPhases,
+            canNavigate = canNavigateAway,
+            onNavigate = onNavigateToPhase
+        )
+        if (isReadOnly) Text("Completed phase — read-only review.")
         ScoringSheetBanner(title = "Weapons", group = groupBanner)
         WeaponsScoringSheetCard(
             competitors = competitors,
             scoresByCompetitor = scoresByCompetitor,
             placementState = placementState,
             judgeCount = judgeCount,
+            isReadOnly = isReadOnly,
             onFinalizePlacings = onFinalizePlacings,
             onScoreChanged = onScoreChanged
         )
@@ -3841,6 +4110,7 @@ private fun WeaponsScoringSheetCard(
     scoresByCompetitor: Map<String, List<String>>,
     placementState: PlacementFinalizeState,
     judgeCount: Int,
+    isReadOnly: Boolean,
     onFinalizePlacings: () -> Unit,
     onScoreChanged: (competitorId: String, judgeIndex: Int, value: String) -> Unit
 ) {
@@ -3867,7 +4137,7 @@ private fun WeaponsScoringSheetCard(
             ) {
                 Button(
                     onClick = onFinalizePlacings,
-                    enabled = competitors.isNotEmpty()
+                    enabled = competitors.isNotEmpty() && !isReadOnly
                 ) {
                     Text(if (placementState.labels.isEmpty()) "Finalize Placings" else "Recalculate Placings")
                 }
@@ -3910,6 +4180,7 @@ private fun WeaponsScoringSheetCard(
                             totalLabel = summary,
                             placementLabel = placementState.labels[competitor.id].orEmpty(),
                             judgeCount = judgeCount,
+                            isReadOnly = isReadOnly,
                             onScoreChanged = { judgeIndex, rawValue ->
                                 onScoreChanged(competitor.id, judgeIndex, rawValue)
                             }
@@ -3946,6 +4217,7 @@ private fun WeaponScoreRow(
     totalLabel: String,
     placementLabel: String,
     judgeCount: Int,
+    isReadOnly: Boolean,
     onScoreChanged: (judgeIndex: Int, value: String) -> Unit
 ) {
     val focusRequesters = remember(judgeCount) { List(judgeCount) { FocusRequester() } }
@@ -3956,18 +4228,15 @@ private fun WeaponScoreRow(
             OutlinedTextField(
                 value = inputs[judgeIndex],
                 onValueChange = { rawValue ->
+                    val shouldAdvanceFocus = shouldAdvanceJudgeScoreFocus(inputs[judgeIndex], rawValue)
                     onScoreChanged(judgeIndex, rawValue)
-                    if (
-                        judgeIndex < judgeCount - 1 &&
-                        rawValue.length >= 3 &&
-                        rawValue.contains('.') &&
-                        rawValue.lastOrNull()?.isDigit() == true
-                    ) {
+                    if (judgeIndex < judgeCount - 1 && shouldAdvanceFocus) {
                         focusRequesters[judgeIndex + 1].requestFocus()
                     }
                 },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                enabled = !isReadOnly,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier
                     .width(72.dp)
                     .focusRequester(focusRequesters[judgeIndex])
@@ -3985,9 +4254,16 @@ private fun HyungsScoringScreen(
     scoresByCompetitor: Map<String, List<String>>,
     placementState: PlacementFinalizeState,
     judgeCount: Int,
+    isReadOnly: Boolean,
+    completedPhases: Set<CompetitionScreen>,
+    canNavigateAway: Boolean,
+    onNavigateToPhase: (CompetitionScreen) -> Unit,
     onBack: () -> Unit,
+    onBackEnabled: Boolean,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    onNextLabel: String,
+    onNextEnabled: Boolean,
     onExit: () -> Unit,
     onScoreChanged: (competitorId: String, judgeIndex: Int, value: String) -> Unit,
     onFinalizePlacings: () -> Unit
@@ -4008,11 +4284,11 @@ private fun HyungsScoringScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(onClick = onBack) {
+                Button(onClick = onBack, enabled = onBackEnabled) {
                     Text("Back to Check-In")
                 }
-                Button(onClick = onNext) {
-                    Text("Next: Sparring")
+                Button(onClick = onNext, enabled = onNextEnabled) {
+                    Text(onNextLabel)
                 }
             }
             Button(
@@ -4022,12 +4298,20 @@ private fun HyungsScoringScreen(
                 Text("Exit App")
             }
         }
+        PhaseReviewNavigation(
+            currentScreen = CompetitionScreen.HYUNGS_SCORING,
+            completedPhases = completedPhases,
+            canNavigate = canNavigateAway,
+            onNavigate = onNavigateToPhase
+        )
+        if (isReadOnly) Text("Completed phase — read-only review.")
         ScoringSheetBanner(title = "Hyungs", group = groupBanner)
         HyungsScoringSheetCard(
             competitors = competitors,
             scoresByCompetitor = scoresByCompetitor,
             placementState = placementState,
             judgeCount = judgeCount,
+            isReadOnly = isReadOnly,
             onFinalizePlacings = onFinalizePlacings,
             onScoreChanged = onScoreChanged
         )
@@ -4040,6 +4324,7 @@ private fun HyungsScoringSheetCard(
     scoresByCompetitor: Map<String, List<String>>,
     placementState: PlacementFinalizeState,
     judgeCount: Int,
+    isReadOnly: Boolean,
     onFinalizePlacings: () -> Unit,
     onScoreChanged: (competitorId: String, judgeIndex: Int, value: String) -> Unit
 ) {
@@ -4066,7 +4351,7 @@ private fun HyungsScoringSheetCard(
             ) {
                 Button(
                     onClick = onFinalizePlacings,
-                    enabled = competitors.isNotEmpty()
+                    enabled = competitors.isNotEmpty() && !isReadOnly
                 ) {
                     Text(if (placementState.labels.isEmpty()) "Finalize Placings" else "Recalculate Placings")
                 }
@@ -4108,6 +4393,7 @@ private fun HyungsScoringSheetCard(
                             totalLabel = summary,
                             placementLabel = placementState.labels[competitor.id].orEmpty(),
                             judgeCount = judgeCount,
+                            isReadOnly = isReadOnly,
                             onScoreChanged = { judgeIndex, rawValue ->
                                 onScoreChanged(competitor.id, judgeIndex, rawValue)
                             }
@@ -4126,6 +4412,7 @@ private fun HyungScoreRow(
     totalLabel: String,
     placementLabel: String,
     judgeCount: Int,
+    isReadOnly: Boolean,
     onScoreChanged: (judgeIndex: Int, value: String) -> Unit
 ) {
     val focusRequesters = remember(judgeCount) { List(judgeCount) { FocusRequester() } }
@@ -4136,18 +4423,15 @@ private fun HyungScoreRow(
             OutlinedTextField(
                 value = inputs[judgeIndex],
                 onValueChange = { rawValue ->
+                    val shouldAdvanceFocus = shouldAdvanceJudgeScoreFocus(inputs[judgeIndex], rawValue)
                     onScoreChanged(judgeIndex, rawValue)
-                    if (
-                        judgeIndex < judgeCount - 1 &&
-                        rawValue.length >= 3 &&
-                        rawValue.contains('.') &&
-                        rawValue.lastOrNull()?.isDigit() == true
-                    ) {
+                    if (judgeIndex < judgeCount - 1 && shouldAdvanceFocus) {
                         focusRequesters[judgeIndex + 1].requestFocus()
                     }
                 },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                enabled = !isReadOnly,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier
                     .width(72.dp)
                     .focusRequester(focusRequesters[judgeIndex])
@@ -4337,9 +4621,15 @@ private fun SparringBracketScreen(
     competitors: List<Competitor>,
     winners: Map<Int, Map<Int, Competitor>>,
     boutProgressByKey: Map<String, SparringBoutProgress>,
+    isReadOnly: Boolean,
+    completedPhases: Set<CompetitionScreen>,
+    canNavigateAway: Boolean,
+    onNavigateToPhase: (CompetitionScreen) -> Unit,
     onBack: () -> Unit,
+    onBackEnabled: Boolean,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
+    onNextEnabled: Boolean,
     onExit: () -> Unit,
     onOpenBout: (roundIndex: Int, boutIndex: Int, bout: BracketSheetBout) -> Unit
 ) {
@@ -4369,11 +4659,11 @@ private fun SparringBracketScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(onClick = onBack) {
+                Button(onClick = onBack, enabled = onBackEnabled) {
                     Text("Back to Check-In")
                 }
-                Button(onClick = onNext) {
-                    Text("Next: Awards & Signatures")
+                Button(onClick = onNext, enabled = onNextEnabled) {
+                    Text("Next: Awards")
                 }
             }
             Button(
@@ -4383,6 +4673,13 @@ private fun SparringBracketScreen(
                 Text("Exit App")
             }
         }
+        PhaseReviewNavigation(
+            currentScreen = CompetitionScreen.SPARRING_BRACKET,
+            completedPhases = completedPhases,
+            canNavigate = canNavigateAway,
+            onNavigate = onNavigateToPhase
+        )
+        if (isReadOnly) Text("Completed phase — read-only review.")
         ScoringSheetBanner(title = "Sparring", group = groupBanner)
         if (competitors.isEmpty()) {
             Text("No eligible sparring competitors.")
@@ -4410,6 +4707,7 @@ private fun SparringBracketScreen(
                             baseSlotCount = bracketRounds.firstOrNull()?.slots?.size ?: 0,
                             roundWinners = winners[roundIndex] ?: emptyMap(),
                             boutProgressByKey = boutProgressByKey,
+                            isReadOnly = isReadOnly,
                             onOpenBout = { boutIndex, bout ->
                                 onOpenBout(roundIndex, boutIndex, bout)
                             }
@@ -5070,6 +5368,8 @@ private fun OverallAwardsScreen(
     completionFeedback: String,
     completionFeedbackIsError: Boolean,
     isCompleting: Boolean,
+    completedPhases: Set<CompetitionScreen>,
+    onNavigateToPhase: (CompetitionScreen) -> Unit,
     onCompleteRound: (DivisionResultPacketBuildRequest, ByteArray, String) -> Unit,
     onBackToSparring: () -> Unit,
     onExit: () -> Unit
@@ -5085,6 +5385,12 @@ private fun OverallAwardsScreen(
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        PhaseReviewNavigation(
+            currentScreen = CompetitionScreen.OVERALL_AWARDS,
+            completedPhases = completedPhases,
+            canNavigate = true,
+            onNavigate = onNavigateToPhase
+        )
         Box(modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = {
@@ -6185,6 +6491,7 @@ private fun BracketRoundColumn(
     baseSlotCount: Int,
     roundWinners: Map<Int, Competitor>,
     boutProgressByKey: Map<String, SparringBoutProgress>,
+    isReadOnly: Boolean,
     onOpenBout: (boutIndex: Int, bout: BracketSheetBout) -> Unit
 ) {
     Column(
@@ -6283,6 +6590,7 @@ private fun BracketRoundColumn(
                             bout = bout,
                             progress = progress,
                             effectiveWinner = effectiveWinner,
+                            isReadOnly = isReadOnly,
                             onOpenBout = { onOpenBout(boutIndex, bout) }
                         )
                     }
@@ -6297,6 +6605,7 @@ private fun BracketBoutCard(
     bout: BracketSheetBout,
     progress: SparringBoutProgress?,
     effectiveWinner: Competitor?,
+    isReadOnly: Boolean,
     onOpenBout: () -> Unit
 ) {
     if (!bout.showOnSheet) {
@@ -6344,7 +6653,7 @@ private fun BracketBoutCard(
                     }
                 }
                 if (effectiveWinner == null) {
-                    Button(onClick = onOpenBout) {
+                    Button(onClick = onOpenBout, enabled = !isReadOnly) {
                         Text("Score Bout")
                     }
                 }
@@ -6836,7 +7145,8 @@ private fun formatDurationSeconds(totalSeconds: Int): String {
 
 private fun calculateScoreSummary(scoreInputs: List<String>): String {
     val total = calculateScoreTotal(scoreInputs) ?: return when {
-        scoreInputs.any { it.isNotBlank() && it.toDoubleOrNull() == null } -> "Invalid score"
+        scoreInputs.any(::isPartialJudgeScore) -> "Finish score entry"
+        scoreInputs.any { it.isNotBlank() && !isValidJudgeScore(it) } -> "Invalid score"
         scoreInputs.any { it.isNotBlank() } -> "Need 3 or 5 scores"
         else -> ""
     }
@@ -6895,12 +7205,17 @@ private fun calculateScoreTotal(scoreInputs: List<String>): Double? {
     val entered = scoreInputs.filter { it.isNotBlank() }
     if (entered.isEmpty()) return null
 
+    if (entered.any { !isValidJudgeScore(it) }) return null
     val parsed = entered.map { it.toDoubleOrNull() }
     if (parsed.any { it == null }) return null
     val scores = parsed.filterNotNull()
     if (scores.size != 3 && scores.size != 5) return null
 
     return TournamentEngine.calculateHyungTotal(scores)
+}
+
+private fun isPlacementsPhaseFinalized(state: PlacementFinalizeState): Boolean {
+    return state.message == "Placings finalized." && state.labels.isNotEmpty()
 }
 
 private val rankSortOrder = mapOf(

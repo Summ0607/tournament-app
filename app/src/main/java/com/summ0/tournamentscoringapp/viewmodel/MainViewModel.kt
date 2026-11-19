@@ -5,6 +5,7 @@ import com.summ0.tournamentscoringapp.engine.DivisionResultPacketBuildRequest
 import com.summ0.tournamentscoringapp.engine.DivisionResultPacketBuilder
 import com.summ0.tournamentscoringapp.engine.DivisionResultPacketStore
 import com.summ0.tournamentscoringapp.engine.DivisionResultSubmissionResult
+import com.summ0.tournamentscoringapp.engine.DivisionResultSubmissionNetworkFailure
 import com.summ0.tournamentscoringapp.engine.DivisionResultSubmissionRingAssignment
 import com.summ0.tournamentscoringapp.engine.buildFrozenCompletionSubmissionPayload
 import com.summ0.tournamentscoringapp.engine.HeartbeatProgressSnapshot
@@ -30,9 +31,10 @@ import com.summ0.tournamentscoringapp.engine.sendRingHeartbeat
 import com.summ0.tournamentscoringapp.engine.serializeDivisionResultPacket
 import com.summ0.tournamentscoringapp.engine.submitDivisionResult
 import org.json.JSONObject
-import java.io.File
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -66,6 +68,8 @@ class MainViewModel(
     private val submitter: suspend (String, String, JSONObject) -> DivisionResultSubmissionResult =
         { serverBaseUrl, ringId, packetJson -> submitDivisionResult(serverBaseUrl, ringId, packetJson) }
 ) {
+    private val pendingSyncMutex = Mutex()
+
     private companion object {
         private const val TAG = "DivisionResultUploader"
     }
@@ -116,18 +120,53 @@ class MainViewModel(
     suspend fun finalizeAndSubmitResults(
         serverBaseUrl: String,
         request: DivisionResultPacketBuildRequest,
-        completionSnapshot: JSONObject? = null
+        completionSnapshot: JSONObject? = null,
+        onPacketSaved: () -> Unit = {}
     ): DivisionResultSubmissionResult {
-        val packet = DivisionResultPacketBuilder.build(request)
-        val packetJson = serializeDivisionResultPacket(packet)
-        val outgoingPacketJson = completionSnapshot?.let { snapshot ->
-            buildFrozenCompletionSubmissionPayload(packetJson, snapshot)
-        } ?: packetJson
-        return submitPacket(
-            serverBaseUrl = serverBaseUrl,
+        val store = packetStore()
+        val existingPending = store.findPendingPacket(
+            eventName = request.eventName,
             ringId = request.ringId,
-            packetJson = outgoingPacketJson,
-            submissionId = packet.submissionId
+            groupId = request.groupId,
+            groupDivisionNumber = request.groupDivisionNumber
+        )
+        val packetJson = existingPending?.let(store::loadPacket) ?: run {
+            uploadStatus = DivisionResultUploadStatus.Saving
+            val packet = DivisionResultPacketBuilder.build(request)
+            val serialized = serializeDivisionResultPacket(packet)
+            val outgoing = completionSnapshot?.let { snapshot ->
+                buildFrozenCompletionSubmissionPayload(serialized, snapshot)
+            } ?: serialized
+            store.savePending(outgoing, serverBaseUrl, request.ringId)
+            outgoing
+        }
+        onPacketSaved()
+        val submissionId = packetJson.optString("submissionId")
+        val results = syncPendingSubmissions()
+        val targetResult = results.firstOrNull { it.first == submissionId }?.second
+        if (targetResult != null) return targetResult
+
+        val blockingResult = results.firstOrNull()
+        val blockingSubmissionId = blockingResult?.first.orEmpty()
+        val message = when (val blocking = blockingResult?.second) {
+            is DivisionResultSubmissionResult.Rejected ->
+                "Earlier division result $blockingSubmissionId was rejected by the server " +
+                    "(HTTP ${blocking.response.statusCode}). Later results are held until it is resolved."
+            is DivisionResultSubmissionResult.NetworkFailure ->
+                "Earlier division result $blockingSubmissionId has no server receipt yet. " +
+                    "Later results are held until it is accepted."
+            else ->
+                "An earlier saved division result has not been accepted yet. " +
+                    "This division is saved on the tablet and will upload after the earlier result is resolved."
+        }
+        val statusCode = when (val blocking = blockingResult?.second) {
+            is DivisionResultSubmissionResult.Rejected -> blocking.response.statusCode
+            is DivisionResultSubmissionResult.NetworkFailure -> blocking.failure.statusCode
+            else -> null
+        }
+        uploadStatus = DivisionResultUploadStatus.PendingRetry(submissionId, message)
+        return DivisionResultSubmissionResult.NetworkFailure(
+            DivisionResultSubmissionNetworkFailure(message, statusCode)
         )
     }
 
@@ -195,72 +234,73 @@ class MainViewModel(
     }
 
     suspend fun retryPendingSubmissions(): List<DivisionResultSubmissionResult> {
+        return syncPendingSubmissions().map { it.second }
+    }
+
+    private suspend fun syncPendingSubmissions(): List<Pair<String, DivisionResultSubmissionResult>> =
+        pendingSyncMutex.withLock {
         val store = packetStore()
         val pendingFiles = store.listPending()
         if (pendingFiles.isEmpty()) {
             uploadStatus = DivisionResultUploadStatus.Idle
-            return emptyList()
+            return@withLock emptyList()
         }
 
-        val results = mutableListOf<DivisionResultSubmissionResult>()
+        val results = mutableListOf<Pair<String, DivisionResultSubmissionResult>>()
         for (pendingFile in pendingFiles) {
             val metadata = store.loadMetadata(pendingFile)
-            val packetText = pendingFile.readText()
             val packetJson = store.loadPacket(pendingFile)
-            results += submitPacket(
-                serverBaseUrl = migrateLegacyServerBaseUrl(metadata.serverBaseUrl),
-                ringId = metadata.ringId,
-                packetJson = packetJson,
-                packetText = packetText,
-                submissionId = packetJson.optString("submissionId", pendingFile.nameWithoutExtension),
-                existingPendingFile = pendingFile
+            val submissionId = packetJson.optString("submissionId", pendingFile.nameWithoutExtension)
+            uploadStatus = DivisionResultUploadStatus.Uploading
+            val result = submitter(
+                migrateLegacyServerBaseUrl(metadata.serverBaseUrl),
+                metadata.ringId,
+                packetJson
             )
-        }
-        return results
-    }
-
-    private suspend fun submitPacket(
-        serverBaseUrl: String,
-        ringId: String,
-        packetJson: JSONObject,
-        packetText: String = packetJson.toString(),
-        submissionId: String,
-        existingPendingFile: File? = null
-    ): DivisionResultSubmissionResult {
-        val store = packetStore()
-        uploadStatus = DivisionResultUploadStatus.Saving
-        val pendingFile = existingPendingFile ?: store.savePending(packetJson, serverBaseUrl, ringId)
-        uploadStatus = DivisionResultUploadStatus.Uploading
-        return when (val result = if (existingPendingFile == null) {
-            submitter(serverBaseUrl, ringId, packetJson)
-        } else {
-            submitDivisionResult(serverBaseUrl, ringId, packetText)
-        }) {
-            is DivisionResultSubmissionResult.Accepted -> {
-                store.markSent(pendingFile, result.response.rawJson)
-                latestRingAssignment = result.response.ringAssignment
-                uploadStatus = DivisionResultUploadStatus.Accepted(
-                    submissionId = result.response.submissionId.ifBlank { submissionId },
-                    serverRecordId = result.response.serverRecordId,
-                    ringAssignment = result.response.ringAssignment
-                )
-                result
-            }
-            is DivisionResultSubmissionResult.Rejected -> {
-                uploadStatus = DivisionResultUploadStatus.Rejected(
-                    submissionId = submissionId,
-                    errors = result.response.errors
-                )
-                result
-            }
-            is DivisionResultSubmissionResult.NetworkFailure -> {
-                uploadStatus = DivisionResultUploadStatus.PendingRetry(
-                    submissionId = submissionId,
-                    message = result.failure.message
-                )
-                result
+            when (result) {
+                is DivisionResultSubmissionResult.Accepted -> {
+                    if (
+                        result.response.rawJson.optBoolean("accepted") != true ||
+                        result.response.rawJson.optString("submissionId") != submissionId ||
+                        result.response.serverRecordId.isBlank()
+                    ) {
+                        val failure = DivisionResultSubmissionResult.NetworkFailure(
+                            DivisionResultSubmissionNetworkFailure(
+                                "The server response did not confirm this division's submission ID and record."
+                            )
+                        )
+                        uploadStatus = DivisionResultUploadStatus.PendingRetry(submissionId, failure.failure.message)
+                        results += submissionId to failure
+                        break
+                    }
+                    store.markSent(pendingFile, result.response.rawJson)
+                    latestRingAssignment = result.response.ringAssignment
+                    uploadStatus = DivisionResultUploadStatus.Accepted(
+                        submissionId = submissionId,
+                        serverRecordId = result.response.serverRecordId,
+                        ringAssignment = result.response.ringAssignment
+                    )
+                    results += submissionId to result
+                }
+                is DivisionResultSubmissionResult.Rejected -> {
+                    uploadStatus = DivisionResultUploadStatus.Rejected(
+                        submissionId = submissionId,
+                        errors = result.response.errors
+                    )
+                    results += submissionId to result
+                    break
+                }
+                is DivisionResultSubmissionResult.NetworkFailure -> {
+                    uploadStatus = DivisionResultUploadStatus.PendingRetry(
+                        submissionId = submissionId,
+                        message = result.failure.message
+                    )
+                    results += submissionId to result
+                    break
+                }
             }
         }
+        results
     }
 
     private fun packetStore(): DivisionResultPacketStore {

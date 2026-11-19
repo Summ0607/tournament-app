@@ -2,6 +2,9 @@ package com.summ0.tournamentscoringapp.engine
 
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 data class DivisionResultPacketPendingMetadata(
     val submissionId: String,
@@ -20,14 +23,15 @@ class DivisionResultPacketStore(private val baseDir: File) {
         pendingDir.mkdirs()
 
         val packetFile = pendingFile(submissionId)
-        packetFile.writeText(packetJson.toString(2))
-        metadataFile(submissionId).writeText(
+        writeAtomic(
+            metadataFile(submissionId),
             JSONObject().apply {
                 put("submissionId", submissionId)
                 put("serverBaseUrl", serverBaseUrl)
                 put("ringId", ringId)
             }.toString(2)
         )
+        writeAtomic(packetFile, packetJson.toString(2))
         return packetFile
     }
 
@@ -43,6 +47,19 @@ class DivisionResultPacketStore(private val baseDir: File) {
         return JSONObject(packetFile.readText())
     }
 
+    fun findPendingPacket(
+        eventName: String,
+        ringId: String,
+        groupId: String,
+        groupDivisionNumber: Int
+    ): File? = listPending().firstOrNull { file ->
+        val packet = loadPacket(file)
+        packet.optString("eventName") == eventName &&
+            packet.optString("ringId") == ringId &&
+            packet.optString("groupId") == groupId &&
+            packet.optInt("groupDivisionNumber") == groupDivisionNumber
+    }
+
     fun loadMetadata(packetFile: File): DivisionResultPacketPendingMetadata {
         val submissionId = submissionIdFromPacketFile(packetFile)
         val metadata = JSONObject(metadataFile(submissionId).readText())
@@ -51,6 +68,21 @@ class DivisionResultPacketStore(private val baseDir: File) {
             serverBaseUrl = metadata.optString("serverBaseUrl", ""),
             ringId = metadata.optString("ringId", "")
         )
+    }
+
+    fun loadSentPacket(submissionId: String): JSONObject? {
+        val file = File(File(sentDir, submissionId), "packet.json")
+        return if (file.isFile) JSONObject(file.readText()) else null
+    }
+
+    fun listSentPackets(): List<JSONObject> {
+        sentDir.mkdirs()
+        return sentDir.listFiles()
+            ?.filter { it.isDirectory }
+            ?.mapNotNull { directory ->
+                File(directory, "packet.json").takeIf { it.isFile }?.let { JSONObject(it.readText()) }
+            }
+            ?: emptyList()
     }
 
     fun markSent(packetFile: File, serverResponse: JSONObject): File {
@@ -85,5 +117,22 @@ class DivisionResultPacketStore(private val baseDir: File) {
 
     private fun submissionIdFromPacketFile(packetFile: File): String {
         return packetFile.nameWithoutExtension
+    }
+
+    private fun writeAtomic(target: File, content: String) {
+        target.parentFile?.mkdirs()
+        val temp = File(target.parentFile, "${target.name}.tmp")
+        temp.writeText(content)
+        try {
+            Files.move(
+                temp.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+            )
+        } catch (_: Exception) {
+            target.delete()
+            if (!temp.renameTo(target)) throw IOException("Unable to persist ${target.name}")
+        }
     }
 }

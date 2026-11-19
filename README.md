@@ -139,6 +139,20 @@ Completing a division marks it `COMPLETED`, and a server acknowledgment marks it
 `SUBMITTED` with the accepted submission id. Stored divisions are retained for
 later use and survive app restarts.
 
+The saved competition screen is restored after leaving and relaunching the app.
+The first valid score locks that phase's entrants; the first saved sparring
+activity locks sparring entrants. An active, incomplete phase cannot be left or
+skipped. Once completed, its score sheet or bracket remains available for
+read-only review from Check-In and later phases.
+Awards cannot be opened until at least one competition phase is available and
+all available competition phases are complete.
+
+Weapons, hyungs and tie-break score fields use numeric input: the first digit
+must be 5–9 and the decimal point is inserted automatically; the decimal digit
+can be 0–9. Completing a score automatically advances focus to the next judge's
+field when one is available. Incomplete and out-of-range scores do not count
+toward placements.
+
 The results screen displays **Division completion** feedback while saving or
 uploading and after an upload is rejected or cannot be confirmed. Rejections
 include the HTTP status and explain duplicate accepted results, ring-assignment
@@ -146,8 +160,16 @@ conflicts, authorization problems, or validation errors. The message distinguish
 locally saved results from server acceptance and is not overwritten by heartbeats.
 **Complete Round** shows **Uploading...** and is disabled during an attempt.
 Missing tournament/division information is shown instead of silently ignoring
-the tap. This feedback does not automatically overwrite existing server results
-or change the pending-upload/retry workflow.
+the tap. If the network is unavailable, the completed division is marked
+locally complete, the tablet returns to Check-In, and the next division can be
+loaded by QR without clearing local results.
+
+Pending division packets retain their original submission IDs and upload oldest
+first whenever connectivity returns. A server rejection stops the queue so a
+later division cannot bypass ring assignment validation. Check-In shows pending
+results below the main action buttons with a **Sync now** action. Pending results
+remain stored on the tablet until server acknowledgment. Division-result transfer
+remains separate from the judge-service packet workflow.
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionStoreTest`,
 `DivisionSessionTest`).
@@ -160,7 +182,8 @@ Divisions reach the tablet two ways, both producing an identical loaded division
   decodes a `tournament-division-qr` code printed in advance by the server. The
   payload is raw-deflate + base64url with a SHA-256 integrity prefix, matching
   the server encoder; a tampered or foreign code is rejected. No network is
-  required, so divisions can be loaded fully offline.
+  required, so divisions can be loaded fully offline. Check-In also provides
+  **Scan next division QR** after a division has been loaded or completed.
 - **Network package** — **Stored divisions → Load ring divisions** fetches
   `GET /api/rings/{ringId}/division-package` and stores the ring's current and
   queued divisions at once.
@@ -230,11 +253,9 @@ coordinator can review and import received packets as unverified Tournament
 experience; coordinator verification remains a separate action. Legacy combined
 SK/TK entries require the coordinator to identify Scorekeeper or Timekeeper.
 
-When network transfer is unavailable, **Save packet to USB** writes the same
-durable packet through Android's document picker. A coordinator imports it from
-USB in the server's active-tournament Judge Management workspace and returns the
-downloaded receipt file to the tablet. **Import USB receipt** validates that the
-receipt matches a saved submission and records the acknowledgment durably.
+If service transfer is unavailable, the packet remains saved on the tablet.
+Retry **Transfer service** when the server is reachable; the same submission ID
+is reused and an accepted server receipt is saved durably.
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionPackageTest`,
 `DivisionStoreTest`, `RingPhaseServiceTest`).
