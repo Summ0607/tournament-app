@@ -14,7 +14,8 @@ enum class DivisionRecordStatus {
     LOADED,
     IN_PROGRESS,
     COMPLETED,
-    SUBMITTED;
+    SUBMITTED,
+    ALREADY_RECEIVED;
 
     companion object {
         fun parse(value: String): DivisionRecordStatus =
@@ -27,6 +28,17 @@ data class StoredServicePacket(
     val acknowledgement: JSONObject?,
     val eventName: String
 )
+
+data class StoredDivisionServiceSummary(
+    val groupAnchor: String,
+    val groupDivisionNumber: Int?,
+    val divisionName: String,
+    val seatedJudgeCount: Int,
+    val recordedChangeCount: Int
+) {
+    val hasTransferableService: Boolean
+        get() = seatedJudgeCount > 0 || recordedChangeCount > 0
+}
 
 /** Catalog entry for one stored division. */
 data class DivisionRecord(
@@ -209,6 +221,24 @@ class DivisionStore(baseDir: File) {
         }
     }
 
+    fun summarizeRingPhaseService(ringId: String, phase: String): List<StoredDivisionServiceSummary> {
+        require(phase == "P1" || phase == "P2") { "Select P1 or P2 for service summary." }
+        if (ringId.isBlank()) return emptyList()
+
+        return listDivisions().mapNotNull { record ->
+            val stored = loadPhaseServiceForPacket(record.anchor, phase) ?: return@mapNotNull null
+            val service = parseRingPhaseService(stored)
+            if (service.ringId != ringId || service.phase != phase) return@mapNotNull null
+            StoredDivisionServiceSummary(
+                groupAnchor = record.anchor,
+                groupDivisionNumber = record.groupDivisionNumber,
+                divisionName = record.name,
+                seatedJudgeCount = service.seats.values.sumOf { it.size },
+                recordedChangeCount = service.history.size
+            )
+        }
+    }
+
     fun saveJudgePlan(eventName: String, ringId: String, phase: String, plan: JSONObject): Boolean {
         require(eventName.isNotBlank() && ringId.isNotBlank()) { "Event and ring are required to save a judge plan." }
         require(phase == "P1" || phase == "P2") { "Judge plan phase must be P1 or P2." }
@@ -388,6 +418,10 @@ class DivisionStore(baseDir: File) {
 
     fun markSubmitted(anchor: String, submissionId: String) {
         touch(anchor) { it.copy(status = DivisionRecordStatus.SUBMITTED, submissionId = submissionId) }
+    }
+
+    fun markAlreadyReceived(anchor: String, submissionId: String) {
+        touch(anchor) { it.copy(status = DivisionRecordStatus.ALREADY_RECEIVED, submissionId = submissionId) }
     }
 
     fun activeAnchor(): String? = readIndex().activeAnchor.ifBlank { null }

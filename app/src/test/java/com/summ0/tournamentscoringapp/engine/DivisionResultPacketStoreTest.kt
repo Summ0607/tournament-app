@@ -41,4 +41,29 @@ class DivisionResultPacketStoreTest {
         assertEquals(listOf("submission-2.json"), store.listPending().map { it.name })
         assertTrue(sent.isFile)
     }
+
+    @Test
+    fun keepsAlreadyReceivedPacketsAndTheExistingServerReceiptForReview() {
+        val store = DivisionResultPacketStore(folder.root)
+        val packetFile = store.savePending(
+            packet("submission-1", "ring-1", "group-1", 1),
+            "https://server",
+            "ring-1"
+        )
+
+        val resolved = store.markAlreadyReceived(
+            packetFile,
+            JSONObject()
+                .put("resolution", "already_received")
+                .put("localSubmissionId", "submission-1")
+                .put("serverRecordId", "existing-record")
+                .put("receivedAt", "2026-11-19T12:00:00Z")
+        )
+
+        assertTrue(resolved.isFile)
+        assertTrue(store.listPending().isEmpty())
+        assertEquals("submission-1", store.loadSentPacket("submission-1")?.optString("submissionId"))
+        assertEquals("already_received", store.loadSentResponse("submission-1")?.optString("resolution"))
+        assertEquals("existing-record", store.loadSentResponse("submission-1")?.optString("serverRecordId"))
+    }
 }

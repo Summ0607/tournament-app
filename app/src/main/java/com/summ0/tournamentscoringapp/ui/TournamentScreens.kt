@@ -184,6 +184,32 @@ internal fun normalizeImportedPhaseHistory(
     )
 }
 
+internal fun shouldReleaseResolvedDivisionForIdleRing(
+    divisionStatus: DivisionRecordStatus?,
+    pendingResultCount: Int,
+    currentRingId: String,
+    assignment: RingAssignment
+): Boolean =
+    (divisionStatus == DivisionRecordStatus.SUBMITTED ||
+        divisionStatus == DivisionRecordStatus.ALREADY_RECEIVED) &&
+        pendingResultCount == 0 &&
+        currentRingId.isNotBlank() &&
+        assignment.ringId == currentRingId &&
+        assignment.currentGroup == null &&
+        assignment.queuedGroupDivisionNumbers.isEmpty()
+
+internal fun divisionRecordForResultPacket(
+    records: List<DivisionRecord>,
+    packet: JSONObject
+): DivisionRecord? {
+    val packetGroupId = packet.optString("groupId").trim()
+    if (packetGroupId.isNotBlank()) {
+        records.firstOrNull { it.groupId == packetGroupId }?.let { return it }
+    }
+    val divisionNumber = packet.optInt("groupDivisionNumber").takeIf { it > 0 } ?: return null
+    return records.firstOrNull { it.groupDivisionNumber == divisionNumber }
+}
+
 private fun heartbeatProgressSnapshot(completedCount: Int, totalCount: Int): HeartbeatProgressSnapshot {
     return HeartbeatProgressSnapshot(
         completedCount = completedCount.coerceAtLeast(0),
@@ -382,9 +408,14 @@ internal fun CheckInScreen(
     var showDivisionQrScanner by remember { mutableStateOf(false) }
     var showStoredDivisions by remember { mutableStateOf(false) }
     var showJudgeServiceDialog by remember { mutableStateOf(false) }
-    var openJudgeServiceChanges by remember { mutableStateOf(false) }
+    var openJudgeServiceUpload by remember { mutableStateOf(false) }
     var storedDivisionRecords by remember { mutableStateOf(emptyList<DivisionRecord>()) }
     var currentService by remember { mutableStateOf<RingPhaseService?>(null) }
+    var savedJudgeServiceByPhase by remember {
+        mutableStateOf<Map<String, List<StoredDivisionServiceSummary>>>(emptyMap())
+    }
+    var savedJudgeServiceSummaryLoaded by remember { mutableStateOf(false) }
+    var savedJudgeServiceSummaryError by remember { mutableStateOf("") }
     var judgeServicePhase by rememberSaveable { mutableStateOf("P1") }
     var serviceTransferStatus by remember { mutableStateOf("") }
     var isSubmittingService by remember { mutableStateOf(false) }
@@ -397,16 +428,34 @@ internal fun CheckInScreen(
     var pendingDivisionResultCount by remember { mutableStateOf(0) }
     var pendingDivisionResultStatus by remember { mutableStateOf("") }
     var isSyncingDivisionResults by remember { mutableStateOf(false) }
+    val localJudgeServiceSummary = when {
+        currentRingId.isBlank() -> ""
+        savedJudgeServiceSummaryError.isNotBlank() ->
+            "Unable to read locally saved judge service: $savedJudgeServiceSummaryError"
+        !savedJudgeServiceSummaryLoaded -> "Checking locally saved judge service..."
+        savedJudgeServiceByPhase.values.all { it.isEmpty() } ->
+            "No division-level judge service records saved locally yet."
+        else -> "Judge service saved locally — " +
+            listOf("P1", "P2").joinToString(" · ") { phase ->
+                val records = savedJudgeServiceByPhase[phase].orEmpty()
+                val transferableCount = records.count { it.hasTransferableService }
+                "$phase: ${records.size} saved (${transferableCount} with service)"
+            }
+    }
+
     suspend fun reconcileSubmittedDivisionResults() {
         val refreshed = withContext(Dispatchers.IO) {
             val resultStore = DivisionResultPacketStore(appContext.filesDir)
             val records = divisionStore.listDivisions()
             resultStore.listSentPackets().forEach { packet ->
                 val submissionId = packet.optString("submissionId")
-                val groupId = packet.optString("groupId")
-                records
-                    .firstOrNull { it.groupId == groupId }
-                    ?.let { divisionStore.markSubmitted(it.anchor, submissionId) }
+                divisionRecordForResultPacket(records, packet)?.let { record ->
+                    if (resultStore.loadSentResponse(submissionId)?.optString("resolution") == "already_received") {
+                        divisionStore.markAlreadyReceived(record.anchor, submissionId)
+                    } else {
+                        divisionStore.markSubmitted(record.anchor, submissionId)
+                    }
+                }
             }
             resultStore.listPending().size to divisionStore.listDivisions()
         }
@@ -687,6 +736,53 @@ internal fun CheckInScreen(
         clearActiveDivisionAnchor()
     }
 
+    suspend fun clearResolvedDivisionWhenRingIsIdle(knownAssignment: RingAssignment? = null) {
+        val anchor = activeDivisionAnchor
+        val expectedRingId = currentRingId
+        if (anchor.isBlank() || expectedRingId.isBlank()) return
+
+        val initialState = withContext(Dispatchers.IO) {
+            divisionStore.record(anchor)?.status to
+                DivisionResultPacketStore(appContext.filesDir).listPending().size
+        }
+        if (
+            initialState.first !in setOf(
+                DivisionRecordStatus.SUBMITTED,
+                DivisionRecordStatus.ALREADY_RECEIVED
+            ) || initialState.second != 0
+        ) return
+
+        val assignment = knownAssignment ?: run {
+            val result = fetchRingAssignment(
+                "${serverBaseUrl.trimEnd('/')}/api/rings/$expectedRingId/current"
+            )
+            result.assignment ?: run {
+                pendingDivisionResultStatus =
+                    "Division results were uploaded, but ring status could not be refreshed. " +
+                        (result.errorMessage ?: "Reconnect the ring before continuing.")
+                return
+            }
+        }
+
+        val latestState = withContext(Dispatchers.IO) {
+            divisionStore.record(anchor)?.status to
+                DivisionResultPacketStore(appContext.filesDir).listPending().size
+        }
+        if (anchor != activeDivisionAnchor || expectedRingId != currentRingId) return
+        if (!shouldReleaseResolvedDivisionForIdleRing(
+                divisionStatus = latestState.first,
+                pendingResultCount = latestState.second,
+                currentRingId = expectedRingId,
+                assignment = assignment
+            )
+        ) return
+
+        currentRingAssignment = assignment
+        ringConnectionNeedsReconnect = false
+        markPendingAssignment()
+        remoteStatus = "${assignment.ringLabel} connected. Waiting for the next group."
+    }
+
     fun buildDivisionSessionSnapshot(): DivisionSession {
         return DivisionSession(
             competitors = competitorsState.value,
@@ -781,18 +877,30 @@ internal fun CheckInScreen(
     }
 
     suspend fun syncPendingDivisionResults() {
+        if (!startupRecovered) return
         if (isSyncingDivisionResults) return
         isSyncingDivisionResults = true
         try {
             val results = mainViewModel.retryPendingSubmissions()
             val acceptedCount = results.count { it is DivisionResultSubmissionResult.Accepted }
+            val alreadyReceivedCount = results.count { it is DivisionResultSubmissionResult.AlreadyReceived }
             reconcileSubmittedDivisionResults()
-            val failure = results.firstOrNull { it !is DivisionResultSubmissionResult.Accepted }
+            val failure = results.firstOrNull {
+                it !is DivisionResultSubmissionResult.Accepted &&
+                    it !is DivisionResultSubmissionResult.AlreadyReceived
+            }
             pendingDivisionResultStatus = when {
                 failure != null -> "Upload stopped: ${divisionSubmissionFeedback(failure)}"
-                acceptedCount > 0 -> "Server acknowledged $acceptedCount pending division result${if (acceptedCount == 1) "" else "s"}."
+                acceptedCount > 0 && alreadyReceivedCount > 0 ->
+                    "Server acknowledged $acceptedCount result${if (acceptedCount == 1) "" else "s"}; " +
+                        "$alreadyReceivedCount division${if (alreadyReceivedCount == 1) "" else "s"} were already on the server."
+                acceptedCount > 0 ->
+                    "Server acknowledged $acceptedCount pending division result${if (acceptedCount == 1) "" else "s"}."
+                alreadyReceivedCount > 0 ->
+                    "$alreadyReceivedCount division${if (alreadyReceivedCount == 1) "" else "s"} already had a result on the server."
                 else -> pendingDivisionResultStatus
             }
+            if (failure == null) clearResolvedDivisionWhenRingIsIdle()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
@@ -814,7 +922,8 @@ internal fun CheckInScreen(
         onDispose { connectivityManager.unregisterNetworkCallback(callback) }
     }
 
-    LaunchedEffect(appContext) {
+    LaunchedEffect(appContext, startupRecovered) {
+        if (!startupRecovered) return@LaunchedEffect
         refreshPendingDivisionResultCount()
         syncPendingDivisionResults()
     }
@@ -1068,6 +1177,11 @@ internal fun CheckInScreen(
         loadJudgePlan(judgeServicePhase)
     }
 
+    fun openJudgeServiceUploadPanel() {
+        openJudgeServiceUpload = true
+        openJudgeServiceAfterRingConnect()
+    }
+
     fun submitJudgeServicePacket() {
         if (isSubmittingService) return
         val ringId = TabletAuthorization.ringId()?.takeIf { it.isNotBlank() } ?: currentRingId
@@ -1292,12 +1406,36 @@ internal fun CheckInScreen(
             val assignment = fetchResult.assignment
             if (assignment != null) {
                 selectedLaunchRingId = assignment.ringId
+                val shouldReleaseSubmittedGroup = if (
+                    preserveLoadedGroupOnReconnect &&
+                    assignment.currentGroup == null &&
+                    assignment.queuedGroupDivisionNumbers.isEmpty()
+                ) {
+                    val anchor = activeDivisionAnchor
+                    val expectedRingId = assignment.ringId
+                    val localState = withContext(Dispatchers.IO) {
+                        divisionStore.record(anchor)?.status to
+                            DivisionResultPacketStore(appContext.filesDir).listPending().size
+                    }
+                    anchor == activeDivisionAnchor &&
+                        shouldReleaseResolvedDivisionForIdleRing(
+                            divisionStatus = localState.first,
+                            pendingResultCount = localState.second,
+                            currentRingId = expectedRingId,
+                            assignment = assignment
+                        )
+                } else {
+                    false
+                }
                 syncAssignmentFromServer(
                     assignment = assignment,
-                    preserveLoadedGroup = preserveLoadedGroupOnReconnect
+                    preserveLoadedGroup = preserveLoadedGroupOnReconnect && !shouldReleaseSubmittedGroup
                 )
+                if (!shouldReleaseSubmittedGroup) {
+                    clearResolvedDivisionWhenRingIsIdle(assignment)
+                }
                 remoteStatus = when {
-                    preserveLoadedGroupOnReconnect -> "${assignment.ringLabel} reconnected."
+                    preserveLoadedGroupOnReconnect && !shouldReleaseSubmittedGroup -> "${assignment.ringLabel} reconnected."
                     currentGroupBanner.isLoaded -> "${assignment.ringLabel} connected."
                     else -> "${assignment.ringLabel} connected. Waiting for the next group."
                 }
@@ -1310,7 +1448,19 @@ internal fun CheckInScreen(
                         progress = currentHeartbeatProgress
                     )
                 )
-                openJudgeServiceAfterRingConnect()
+                val hasSavedServiceHistory = withContext(Dispatchers.IO) {
+                    divisionStore.listDivisions().any { record ->
+                        listOf("P1", "P2").any { phase ->
+                            divisionStore.loadService(record.anchor, phase)
+                                ?.optString("ringId") == assignment.ringId
+                        }
+                    }
+                }
+                if (hasSavedServiceHistory) {
+                    openJudgeServiceUploadPanel()
+                } else {
+                    openJudgeServiceAfterRingConnect()
+                }
                 onSuccess?.invoke()
             } else {
                 if (hadAssignedRing) {
@@ -1354,7 +1504,7 @@ internal fun CheckInScreen(
         if (isCompletingGroup) return
         isCompletingGroup = true
         screenScope.launch {
-            var serverAccepted = false
+            var serverHasResult = false
             try {
                 completionFeedbackIsError = false
                 val ringId = currentRingId.trim()
@@ -1391,10 +1541,12 @@ internal fun CheckInScreen(
                     }
                 )
                 completionFeedback = divisionSubmissionFeedback(submissionResult)
-                completionFeedbackIsError = submissionResult !is DivisionResultSubmissionResult.Accepted
+                completionFeedbackIsError =
+                    submissionResult !is DivisionResultSubmissionResult.Accepted &&
+                        submissionResult !is DivisionResultSubmissionResult.AlreadyReceived
                 when (submissionResult) {
                     is DivisionResultSubmissionResult.Accepted -> {
-                        serverAccepted = true
+                        serverHasResult = true
                         remoteStatus = "Loading next group: saving results..."
                         markRingConnectionHealthy()
                         if (completedDivisionAnchor.isNotBlank()) {
@@ -1454,6 +1606,20 @@ internal fun CheckInScreen(
                             )
                         )
                     }
+                    is DivisionResultSubmissionResult.AlreadyReceived -> {
+                        serverHasResult = true
+                        if (completedDivisionAnchor.isNotBlank()) {
+                            divisionStore.markAlreadyReceived(
+                                completedDivisionAnchor,
+                                submissionResult.submissionId
+                            )
+                        }
+                        currentScreenState.value = CompetitionScreen.CHECK_IN
+                        reconcileSubmittedDivisionResults()
+                        remoteStatus = completionFeedback
+                        pendingDivisionResultStatus = completionFeedback
+                        clearResolvedDivisionWhenRingIsIdle()
+                    }
                     is DivisionResultSubmissionResult.Rejected -> {
                         remoteStatus = completionFeedback
                         Log.w(COMPLETE_ROUND_TRACE_TAG, completionFeedback)
@@ -1481,8 +1647,9 @@ internal fun CheckInScreen(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                completionFeedback = if (serverAccepted) {
-                    "The server accepted the results, but completion could not finish. Do not complete again. " +
+                completionFeedback = if (serverHasResult) {
+                    "A result is already recorded on the server, but ring status could not be refreshed. " +
+                        "Do not complete this division again. " +
                         "Reconnect the ring or ask the head table for help."
                 } else {
                     "Completion could not finish. Check the stored results and the head table before trying again; do not clear app storage."
@@ -1596,14 +1763,21 @@ internal fun CheckInScreen(
             onAttendanceChange = { associationId, status ->
                 recordJudgeAttendance(associationId, status)
             },
+            savedServiceRecordsByPhase = savedJudgeServiceByPhase,
+            savedServiceSummaryLoaded = savedJudgeServiceSummaryLoaded,
+            savedServiceSummaryError = savedJudgeServiceSummaryError,
             transferStatus = serviceTransferStatus,
             isTransferring = isSubmittingService,
             onSubmit = { submitJudgeServicePacket() },
             onDismiss = {
+                val shouldReconcileDivision = openJudgeServiceUpload
                 showJudgeServiceDialog = false
-                openJudgeServiceChanges = false
+                openJudgeServiceUpload = false
+                if (shouldReconcileDivision) {
+                    screenScope.launch { syncPendingDivisionResults() }
+                }
             },
-            initiallyShowChanges = openJudgeServiceChanges
+            initiallyShowUpload = openJudgeServiceUpload
         )
     }
 
@@ -1635,6 +1809,30 @@ internal fun CheckInScreen(
         pendingRingConnection = TabletAuthorization.server() != null
         startupRecovered = true
         if (!pendingRingConnection) refreshLaunchRingOptions()
+    }
+
+    LaunchedEffect(currentRingId, activeDivisionAnchor, currentService, storedDivisionRecords) {
+        if (currentRingId.isBlank()) {
+            savedJudgeServiceByPhase = emptyMap()
+            savedJudgeServiceSummaryError = ""
+            savedJudgeServiceSummaryLoaded = true
+            return@LaunchedEffect
+        }
+        savedJudgeServiceSummaryLoaded = false
+        savedJudgeServiceSummaryError = ""
+        try {
+            savedJudgeServiceByPhase = withContext(Dispatchers.IO) {
+                listOf("P1", "P2").associateWith { phase ->
+                    divisionStore.summarizeRingPhaseService(currentRingId, phase)
+                }
+            }
+            savedJudgeServiceSummaryLoaded = true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            savedJudgeServiceSummaryError = error.message ?: "Unable to read local service records."
+            savedJudgeServiceSummaryLoaded = true
+        }
     }
 
     LaunchedEffect(activeDivisionAnchor, currentRingId, judgeServicePhase, currentJudgeAttendance) {
@@ -2371,6 +2569,7 @@ internal fun CheckInScreen(
     if (showLaunchScreen) {
         LaunchScreenPanel(
             currentRingLabel = currentRingLabel,
+            localJudgeServiceSummary = localJudgeServiceSummary,
             currentRingId = currentRingId,
             status = if (currentRingId.isBlank()) launchServerStatus else remoteStatus,
             serverReachable = launchServerReachable,
@@ -2381,11 +2580,7 @@ internal fun CheckInScreen(
             onConnectSelectedRing = { connectSelectedRing() },
             onScanRing = { showRingPairing = true },
             onScanDivisionQr = { showDivisionQrScanner = true },
-            onOpenJudgeService = { openJudgeServiceAfterRingConnect() },
-            onFinalizeJudgeService = {
-                openJudgeServiceChanges = true
-                openJudgeServiceAfterRingConnect()
-            },
+            onOpenJudgeService = { openJudgeServiceUploadPanel() },
             onOpenStoredDivisions = {
                 refreshStoredDivisions()
                 showStoredDivisions = true
@@ -2409,6 +2604,7 @@ internal fun CheckInScreen(
                     CheckInHeaderCard(
                         currentGroupBanner = currentGroupBanner,
                         currentRingLabel = currentRingLabel,
+                        localJudgeServiceSummary = localJudgeServiceSummary,
                         connectionStateHeadline = connectionStateHeadline,
                         connectionStateBody = connectionStateBody,
                         checkedInCount = checkedInCount,
@@ -2423,7 +2619,7 @@ internal fun CheckInScreen(
                         nextCompetitionButtonLabel = nextCompetitionButtonLabel,
                         nextCompetitionButtonEnabled = nextCompetitionButtonEnabled,
                         onOpenNextCompetition = { moveToScreen(nextCompetitionScreen) },
-                        onOpenJudgeService = { showJudgeServiceDialog = true },
+                        onOpenJudgeService = { openJudgeServiceUploadPanel() },
                         onScanDivisionQr = { showDivisionQrScanner = true },
                         storedDivisionCount = storedDivisionRecords.size,
                         onOpenStoredDivisions = {
@@ -2502,6 +2698,7 @@ internal fun CheckInScreen(
                     CheckInHeaderCard(
                         currentGroupBanner = currentGroupBanner,
                         currentRingLabel = currentRingLabel,
+                        localJudgeServiceSummary = localJudgeServiceSummary,
                         connectionStateHeadline = connectionStateHeadline,
                         connectionStateBody = connectionStateBody,
                         checkedInCount = checkedInCount,
@@ -2516,7 +2713,7 @@ internal fun CheckInScreen(
                         nextCompetitionButtonLabel = nextCompetitionButtonLabel,
                         nextCompetitionButtonEnabled = nextCompetitionButtonEnabled,
                         onOpenNextCompetition = { moveToScreen(nextCompetitionScreen) },
-                        onOpenJudgeService = { showJudgeServiceDialog = true },
+                        onOpenJudgeService = { openJudgeServiceUploadPanel() },
                         onScanDivisionQr = { showDivisionQrScanner = true },
                         storedDivisionCount = storedDivisionRecords.size,
                         onOpenStoredDivisions = {
@@ -2597,6 +2794,7 @@ internal fun CheckInScreen(
                     CheckInHeaderCard(
                         currentGroupBanner = currentGroupBanner,
                         currentRingLabel = currentRingLabel,
+                        localJudgeServiceSummary = localJudgeServiceSummary,
                         connectionStateHeadline = connectionStateHeadline,
                         connectionStateBody = connectionStateBody,
                         checkedInCount = checkedInCount,
@@ -2611,7 +2809,7 @@ internal fun CheckInScreen(
                         nextCompetitionButtonLabel = nextCompetitionButtonLabel,
                         nextCompetitionButtonEnabled = nextCompetitionButtonEnabled,
                         onOpenNextCompetition = { moveToScreen(nextCompetitionScreen) },
-                        onOpenJudgeService = { showJudgeServiceDialog = true },
+                        onOpenJudgeService = { openJudgeServiceUploadPanel() },
                         onScanDivisionQr = { showDivisionQrScanner = true },
                         storedDivisionCount = storedDivisionRecords.size,
                         onOpenStoredDivisions = {
@@ -2773,6 +2971,7 @@ private fun PhaseReviewNavigation(
 private fun CheckInHeaderCard(
     currentGroupBanner: GroupBanner,
     currentRingLabel: String,
+    localJudgeServiceSummary: String,
     ringAssignment: RingAssignment? = null,
     connectionStateHeadline: String,
     connectionStateBody: String,
@@ -2946,7 +3145,7 @@ private fun CheckInHeaderCard(
                             contentPadding = actionPadding,
                             modifier = Modifier.height(if (dense) 34.dp else 40.dp)
                         ) {
-                            Text("Judge Check-In", fontSize = actionTextSize)
+                            Text("Update / Submit Service", fontSize = actionTextSize)
                         }
                     }
                 }
@@ -2968,6 +3167,13 @@ private fun CheckInHeaderCard(
                         }
                     }
                 }
+            }
+            if (localJudgeServiceSummary.isNotBlank()) {
+                Text(
+                    text = localJudgeServiceSummary,
+                    fontSize = bodySize,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             if (pendingDivisionResultCount > 0 || pendingDivisionResultStatus.isNotBlank()) {
                 Column(
@@ -2999,6 +3205,7 @@ private fun CheckInHeaderCard(
 @Composable
 internal fun LaunchScreenPanel(
     currentRingLabel: String,
+    localJudgeServiceSummary: String,
     currentRingId: String,
     status: String,
     serverReachable: Boolean,
@@ -3010,7 +3217,6 @@ internal fun LaunchScreenPanel(
     onScanRing: () -> Unit,
     onScanDivisionQr: () -> Unit,
     onOpenJudgeService: () -> Unit,
-    onFinalizeJudgeService: () -> Unit,
     onOpenStoredDivisions: () -> Unit,
     storedDivisionCount: Int,
     onEditServer: () -> Unit,
@@ -3176,17 +3382,16 @@ internal fun LaunchScreenPanel(
                         fontSize = if (isCompactScreen) 13.sp else 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Text(
+                        text = localJudgeServiceSummary,
+                        fontSize = if (isCompactScreen) 12.sp else 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     OutlinedButton(
                         onClick = onOpenJudgeService,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Judge Check-In")
-                    }
-                    Button(
-                        onClick = onFinalizeJudgeService,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Finalize phase / upload service")
+                        Text("Update / Submit Service")
                     }
                 }
                 if (!serverReachable) {
@@ -3237,6 +3442,7 @@ private fun StoredDivisionsDialog(
                             DivisionRecordStatus.IN_PROGRESS -> "In progress"
                             DivisionRecordStatus.COMPLETED -> "Completed"
                             DivisionRecordStatus.SUBMITTED -> "Submitted"
+                            DivisionRecordStatus.ALREADY_RECEIVED -> "Submitted"
                         }
                         OutlinedButton(
                             onClick = { onOpen(record.anchor) },
@@ -3270,6 +3476,12 @@ private fun StoredDivisionsDialog(
     )
 }
 
+private enum class JudgeServicePanel(val label: String) {
+    CHECK_IN("Check-In"),
+    CHANGES("Changes"),
+    UPLOAD("Upload")
+}
+
 @Composable
 private fun JudgeServiceDialog(
     ringLabel: String,
@@ -3283,11 +3495,14 @@ private fun JudgeServiceDialog(
     attendanceStatus: String,
     isSavingAttendance: Boolean,
     onAttendanceChange: (String, JudgeAttendanceStatus) -> Unit,
+    savedServiceRecordsByPhase: Map<String, List<StoredDivisionServiceSummary>>,
+    savedServiceSummaryLoaded: Boolean,
+    savedServiceSummaryError: String,
     transferStatus: String,
     isTransferring: Boolean,
     onSubmit: () -> Unit,
     onDismiss: () -> Unit,
-    initiallyShowChanges: Boolean = false
+    initiallyShowUpload: Boolean = false
 ) {
     var working by remember(service) { mutableStateOf(service) }
     var selectedRole by remember(working.groupAnchor, working.phase) { mutableStateOf(ServiceRole.CENTER) }
@@ -3300,8 +3515,9 @@ private fun JudgeServiceDialog(
     var secondSwapAssociationId by remember(working.groupAnchor, working.phase) { mutableStateOf("") }
     var message by remember(working.groupAnchor, working.phase) { mutableStateOf<String?>(null) }
     var messageIsError by remember(working.groupAnchor, working.phase) { mutableStateOf(false) }
-    var showTransferConfirmation by remember { mutableStateOf(false) }
-    var showChanges by remember { mutableStateOf(initiallyShowChanges) }
+    var selectedPanel by remember(working.groupAnchor, working.phase, initiallyShowUpload) {
+        mutableStateOf(if (initiallyShowUpload) JudgeServicePanel.UPLOAD else JudgeServicePanel.CHECK_IN)
+    }
 
     fun commit(next: RingPhaseService): Boolean {
         if (!onUpdate(next)) return false
@@ -3318,6 +3534,7 @@ private fun JudgeServiceDialog(
             it.optString("eventName") == pairedEvent
     } == true
     val replacementPinAvailable = planMatches && hasReplacementPinVerifier(judgePlan)
+    val phaseServiceRecords = savedServiceRecordsByPhase[working.phase].orEmpty()
     val firstSwapRole = firstSwapAssociationId.takeIf { it.isNotBlank() }?.let(working::roleOf)
     val secondSwapRole = secondSwapAssociationId.takeIf { it.isNotBlank() }?.let(working::roleOf)
     val swapPairReady = firstSwapRole != null && secondSwapRole != null &&
@@ -3342,14 +3559,14 @@ private fun JudgeServiceDialog(
         onDismissRequest = { if (!isSavingAttendance && !isTransferring) onDismiss() },
         title = {
             Text(
-                "${if (showChanges) "Judge changes" else "Judge Check-In"} - $ringLabel - ${working.phase}",
+                "Judge Service - ${selectedPanel.label} - $ringLabel - ${working.phase}",
                 fontWeight = FontWeight.Bold
             )
         },
         text = {
             Column(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(if (showChanges) 10.dp else 0.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("P1", "P2").forEach { phase ->
@@ -3377,15 +3594,40 @@ private fun JudgeServiceDialog(
                         Text("Refresh")
                     }
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    JudgeServicePanel.entries.forEach { panel ->
+                        val onClick = { selectedPanel = panel }
+                        val enabled = !isTransferring && !isSavingAttendance
+                        if (selectedPanel == panel) {
+                            Button(
+                                onClick = onClick,
+                                enabled = enabled,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(panel.label, fontSize = 12.sp, maxLines = 1)
+                            }
+                        } else {
+                            OutlinedButton(
+                                onClick = onClick,
+                                enabled = enabled,
+                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(panel.label, fontSize = 12.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
                 if (planSummary.isNotBlank()) Text(planSummary, fontSize = 12.sp)
-                if (!showChanges && !planMatches) {
+                if (selectedPanel == JudgeServicePanel.CHECK_IN && !planMatches) {
                     if (planSummary.isBlank()) Text("No assigned judges for this phase.", fontSize = 12.sp)
-                } else if (!showChanges && attendance == null) {
+                } else if (selectedPanel == JudgeServicePanel.CHECK_IN && attendance == null) {
                     Text(attendanceStatus.ifBlank { "Attendance could not be recovered; reload the saved plan." },
                         color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                } else if (!showChanges && attendance != null && attendance.officials.isEmpty()) {
+                } else if (selectedPanel == JudgeServicePanel.CHECK_IN && attendance != null && attendance.officials.isEmpty()) {
                     Text("No judges are assigned to this ring and phase.", fontSize = 13.sp)
-                } else if (!showChanges && attendance != null) {
+                } else if (selectedPanel == JudgeServicePanel.CHECK_IN && attendance != null) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Text("Name", Modifier.weight(1f), fontSize = 12.sp)
                         Text("Rank", Modifier.width(42.dp), fontSize = 12.sp)
@@ -3428,7 +3670,9 @@ private fun JudgeServiceDialog(
                     }
                 }
                 if (attendanceStatus.isNotBlank()) Text(attendanceStatus, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
-                if (showChanges) {
+                if (selectedPanel == JudgeServicePanel.CHANGES) {
+                Text("Update / Swap / Replace", fontWeight = FontWeight.SemiBold)
+                Text("Use the lineup actions to record judge departures, role swaps, or replacements.", fontSize = 12.sp)
                 Text("Current lineup", fontWeight = FontWeight.SemiBold)
                 if (working.seats.values.all { it.isEmpty() }) {
                     Text("No judges marked Present.", fontSize = 13.sp)
@@ -3663,46 +3907,72 @@ private fun JudgeServiceDialog(
                     ) { Text("Record replacement") }
                 }
                 }
-                if (transferStatus.isNotBlank()) Text(transferStatus, fontSize = 12.sp)
+                }
+                if (selectedPanel == JudgeServicePanel.UPLOAD) {
+                    Text("Upload Service Results", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "This uploads one consolidated service packet for $ringLabel, phase ${working.phase}, " +
+                            "including recorded service for every division stored on this tablet for that ring and phase.",
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        "This is the final packet for this ring and phase; the server will not accept a replacement afterward. " +
+                            "Verify all division service and changes before submitting. Coordinator review remains separate.",
+                        fontSize = 12.sp
+                    )
+                    HorizontalDivider()
+                    Text(
+                        "Saved locally on this tablet for phase ${working.phase}:",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    when {
+                        savedServiceSummaryError.isNotBlank() -> Text(
+                            "Unable to read saved service records: $savedServiceSummaryError",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 12.sp
+                        )
+                        !savedServiceSummaryLoaded -> Text("Checking local service records...", fontSize = 12.sp)
+                        phaseServiceRecords.isEmpty() -> Text(
+                            "No division-level service records are saved for this ring and phase.",
+                            fontSize = 12.sp
+                        )
+                        else -> {
+                            val transferableCount = phaseServiceRecords.count { it.hasTransferableService }
+                            Text(
+                                "${phaseServiceRecords.size} division records saved; " +
+                                    "$transferableCount have recorded judge service.",
+                                fontSize = 12.sp
+                            )
+                            phaseServiceRecords.forEach { record ->
+                                val label = record.groupDivisionNumber?.let { "Division $it" }
+                                    ?: record.divisionName.ifBlank { record.groupAnchor }
+                                Text(
+                                    "$label: ${record.seatedJudgeCount} judges seated, " +
+                                        "${record.recordedChangeCount} recorded changes.",
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                    Text(
+                        "Local save and server receipt are separate; an upload acknowledgment appears below.",
+                        fontSize = 12.sp
+                    )
+                    if (transferStatus.isNotBlank()) Text(transferStatus, fontSize = 12.sp)
+                    Button(
+                        onClick = onSubmit,
+                        enabled = !isTransferring && !isSavingAttendance,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(if (isTransferring) "Uploading..." else "Finalize & Upload Service")
+                    }
                 }
             }
         },
         confirmButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (showChanges) {
-                    OutlinedButton(onClick = { showTransferConfirmation = true }, enabled = !isTransferring && !isSavingAttendance) {
-                        Text(if (isTransferring) "Transferring..." else "Transfer service")
-                    }
-                }
-                TextButton(onClick = { showChanges = !showChanges }) { Text(if (showChanges) "Check-In" else "Changes / transfer") }
-                TextButton(onClick = onDismiss, enabled = !isSavingAttendance && !isTransferring) { Text("Done") }
-            }
+            TextButton(onClick = onDismiss, enabled = !isSavingAttendance && !isTransferring) { Text("Done") }
         }
     )
-    if (showTransferConfirmation) {
-        AlertDialog(
-            onDismissRequest = { showTransferConfirmation = false },
-            title = { Text("Finalize ring-phase service?") },
-            text = {
-                Text(
-                    "This creates one final packet for ${working.ringId}, ${working.phase}. " +
-                        "A different packet for this ring and phase cannot be accepted afterward. " +
-                        "Confirm all division service, replacements, and role swaps are recorded."
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showTransferConfirmation = false
-                        onSubmit()
-                    }
-                ) { Text("Transfer online") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showTransferConfirmation = false }) { Text("Review") }
-            }
-        )
-    }
 }
 
 @Composable

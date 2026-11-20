@@ -51,6 +51,11 @@ sealed interface DivisionResultUploadStatus {
         val ringAssignment: DivisionResultSubmissionRingAssignment?
     ) : DivisionResultUploadStatus
 
+    data class AlreadyReceived(
+        val submissionId: String,
+        val serverRecordId: String
+    ) : DivisionResultUploadStatus
+
     data class Rejected(
         val submissionId: String,
         val errors: List<String>
@@ -146,12 +151,18 @@ class MainViewModel(
         val targetResult = results.firstOrNull { it.first == submissionId }?.second
         if (targetResult != null) return targetResult
 
-        val blockingResult = results.firstOrNull()
+        val blockingResult = results.firstOrNull {
+            it.second !is DivisionResultSubmissionResult.Accepted &&
+                it.second !is DivisionResultSubmissionResult.AlreadyReceived
+        } ?: results.firstOrNull()
         val blockingSubmissionId = blockingResult?.first.orEmpty()
         val message = when (val blocking = blockingResult?.second) {
             is DivisionResultSubmissionResult.Rejected ->
                 "Earlier division result $blockingSubmissionId was rejected by the server " +
                     "(HTTP ${blocking.response.statusCode}). Later results are held until it is resolved."
+            is DivisionResultSubmissionResult.AlreadyReceived ->
+                "Earlier division result ${blocking.groupId} already exists on the server. " +
+                    "The local packet was retained as an already-received record."
             is DivisionResultSubmissionResult.NetworkFailure ->
                 "Earlier division result $blockingSubmissionId has no server receipt yet. " +
                     "Later results are held until it is accepted."
@@ -282,13 +293,77 @@ class MainViewModel(
                     )
                     results += submissionId to result
                 }
-                is DivisionResultSubmissionResult.Rejected -> {
-                    uploadStatus = DivisionResultUploadStatus.Rejected(
+                is DivisionResultSubmissionResult.AlreadyReceived -> {
+                    if (
+                        result.submissionId != submissionId ||
+                        result.groupId != packetJson.optString("groupId") ||
+                        result.serverRecordId.isBlank()
+                    ) {
+                        val failure = DivisionResultSubmissionResult.NetworkFailure(
+                            DivisionResultSubmissionNetworkFailure(
+                                "The duplicate-result response did not match this division and submission."
+                            )
+                        )
+                        uploadStatus = DivisionResultUploadStatus.PendingRetry(
+                            submissionId,
+                            failure.failure.message
+                        )
+                        results += submissionId to failure
+                        break
+                    }
+                    store.markAlreadyReceived(
+                        pendingFile,
+                        JSONObject()
+                            .put("resolution", "already_received")
+                            .put("localSubmissionId", submissionId)
+                            .put("duplicateGroupId", result.groupId)
+                            .put("serverRecordId", result.serverRecordId)
+                            .put("receivedAt", result.receivedAt)
+                    )
+                    uploadStatus = DivisionResultUploadStatus.AlreadyReceived(
                         submissionId = submissionId,
-                        errors = result.response.errors
+                        serverRecordId = result.serverRecordId
                     )
                     results += submissionId to result
-                    break
+                }
+                is DivisionResultSubmissionResult.Rejected -> {
+                    val response = result.response
+                    val groupId = packetJson.optString("groupId")
+                    if (
+                        response.reason == "duplicate-group-result" &&
+                        groupId.isNotBlank() &&
+                        response.duplicateGroupId == groupId &&
+                        response.existingServerRecordId.isNotBlank()
+                    ) {
+                        store.markAlreadyReceived(
+                            pendingFile,
+                            JSONObject()
+                                .put("resolution", "already_received")
+                                .put("localSubmissionId", submissionId)
+                                .put("duplicateGroupId", response.duplicateGroupId)
+                                .put("serverRecordId", response.existingServerRecordId)
+                                .put("receivedAt", response.existingReceivedAt)
+                                .put("serverResponse", JSONObject(response.rawBody))
+                        )
+                        val alreadyReceived = DivisionResultSubmissionResult.AlreadyReceived(
+                            submissionId = submissionId,
+                            groupId = response.duplicateGroupId,
+                            serverRecordId = response.existingServerRecordId,
+                            receivedAt = response.existingReceivedAt
+                        )
+                        uploadStatus = DivisionResultUploadStatus.AlreadyReceived(
+                            submissionId = submissionId,
+                            serverRecordId = response.existingServerRecordId
+                        )
+                        results += submissionId to alreadyReceived
+                    } else {
+                        uploadStatus = DivisionResultUploadStatus.Rejected(
+                            submissionId = submissionId,
+                            errors = response.errors
+                        )
+                        results += submissionId to result
+                        break
+                    }
                 }
                 is DivisionResultSubmissionResult.NetworkFailure -> {
                     uploadStatus = DivisionResultUploadStatus.PendingRetry(

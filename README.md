@@ -158,6 +158,10 @@ uploading and after an upload is rejected or cannot be confirmed. Rejections
 include the HTTP status and explain duplicate accepted results, ring-assignment
 conflicts, authorization problems, or validation errors. The message distinguishes
 locally saved results from server acceptance and is not overwritten by heartbeats.
+When the server reports a matching duplicate-group result with its existing
+record ID, the tablet archives its local packet for review, records the division
+as **Submitted**, and continues syncing later results; other conflicts remain
+pending for resolution.
 **Complete Round** shows **Uploading...** and is disabled during an attempt.
 Missing tournament/division information is shown instead of silently ignoring
 the tap. If the network is unavailable, the completed division is marked
@@ -195,18 +199,21 @@ saved session.
 
 ### Judge service recording
 
-After a successful ring connection, **Judge Check-In** opens automatically and
-loads the selected P1/P2 assignment plan for that ring. The roster identifies
+After a first ring connection, **Check-In** opens automatically and loads the
+selected P1/P2 assignment plan for that ring. On reconnect, saved service
+history opens directly to Upload. The roster identifies
 the assigned Center, Corner, and SK/TK judges so the operator can confirm
 presence; the phase is independent of the scoring phase. Check-in shows a compact
 Name / Rank code / Dan or Association ID list with one **Present** checkbox.
-Unchecked means absent. Marking Present records service in the planned role;
-no separate seating step is required. **Changes / transfer** opens the optional
+Unchecked means absent. Marking Present adds the judge to the service lineup;
+no separate seating step is required. Scorekeeper and Timekeeper assignments
+are recorded together as the shared SK/TK team role. **Changes / transfer**
+opens the optional
 replacement, swap and packet controls instead of crowding the check-in list.
 The screen supports replacing a serving judge, swapping a Center
 and Corner judge, and removing a judge, keeping a timestamped history of every
-`SEATED`/`REPLACED`/`SWAPPED` change alongside the final lineup. Center, corner,
-scorekeeper, timekeeper and arbitrator are distinct actual roles. Division
+`SEATED`/`REPLACED`/`SWAPPED` change alongside the final lineup. Center, Corner,
+SK/TK and arbitrator are service roles. Division
 histories are stored separately per phase and survive restarts. **Refresh** remains available to reload the ring/phase roster,
 assignment/source revisions, arbitrator
 reserves, and hidden event-PIN verification data without changing the server
@@ -240,22 +247,31 @@ Center service credit only.
 
 **Transfer ring-phase service** consolidates all locally stored division
 histories for that ring and phase into one packet with its own submission ID.
-When connected and waiting for the next division, **Judge Check-In** remains
-available. **Finalize phase / upload service** opens the changes and transfer
-controls without loading another division. Select P1 or P2, then choose
-**Transfer service** and confirm only after this ring has finished that phase.
-This finalizes service for that ring and phase, not other rings, and does not
-disconnect the tablet.
+When connected and waiting for the next division, **Update / Submit Service**
+opens directly to Upload. The main screen shows locally saved P1/P2 service
+record counts, and Upload lists the saved divisions with lineup and change
+totals. These local records are distinct from the server receipt shown after
+transfer. The Judge Service dialog keeps three workflows separate:
+
+- **Check-In** — mark assigned judges present or absent.
+- **Changes** — record departures, replacements, and Center/Corner swaps.
+- **Upload** — review the ring-and-phase scope, then upload one consolidated
+  service packet after this ring has finished the phase.
+
+Select P1 or P2 before recording or uploading. Upload finalizes service for that
+ring and phase, not other rings, and does not disconnect the tablet.
+The finalization warning is shown inline before the single **Finalize & Upload
+Service** action.
 The packet is saved before network transfer; failed or interrupted transfers
 retry with the same ID, and the app records the server receipt durably. A second
 packet for an already acknowledged ring-phase is prevented. The Judge Management
 coordinator can review and import received packets as unverified Tournament
-experience; coordinator verification remains a separate action. Legacy combined
-SK/TK entries require the coordinator to identify Scorekeeper or Timekeeper.
+experience; coordinator verification remains a separate action. SK/TK service
+uses one shared team role without a Scorekeeper/Timekeeper distinction.
 
-If service transfer is unavailable, the packet remains saved on the tablet.
-Retry **Transfer service** when the server is reachable; the same submission ID
-is reused and an accepted server receipt is saved durably.
+If service upload is unavailable, the packet remains saved on the tablet.
+Use **Update / Submit Service** to reopen Upload when the server is reachable;
+the same submission ID is reused and an accepted server receipt is saved durably.
 
 Validate with `.\gradlew.bat testDebugUnitTest` (`DivisionPackageTest`,
 `DivisionStoreTest`, `RingPhaseServiceTest`).

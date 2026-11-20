@@ -388,7 +388,10 @@ data class DivisionResultSubmissionRejectedResponse(
     val statusCode: Int,
     val errors: List<String>,
     val rawBody: String,
-    val reason: String = ""
+    val reason: String = "",
+    val duplicateGroupId: String = "",
+    val existingServerRecordId: String = "",
+    val existingReceivedAt: String = ""
 )
 
 data class DivisionResultSubmissionNetworkFailure(
@@ -398,18 +401,27 @@ data class DivisionResultSubmissionNetworkFailure(
 
 sealed interface DivisionResultSubmissionResult {
     data class Accepted(val response: DivisionResultSubmissionAcceptedResponse) : DivisionResultSubmissionResult
+    data class AlreadyReceived(
+        val submissionId: String,
+        val groupId: String,
+        val serverRecordId: String,
+        val receivedAt: String
+    ) : DivisionResultSubmissionResult
     data class Rejected(val response: DivisionResultSubmissionRejectedResponse) : DivisionResultSubmissionResult
     data class NetworkFailure(val failure: DivisionResultSubmissionNetworkFailure) : DivisionResultSubmissionResult
 }
 
 internal fun divisionSubmissionFeedback(result: DivisionResultSubmissionResult): String = when (result) {
     is DivisionResultSubmissionResult.Accepted -> "Results accepted by the server."
+    is DivisionResultSubmissionResult.AlreadyReceived ->
+        "The server already has a result for this division (record ${result.serverRecordId}). " +
+            "The tablet's saved packet was retained and was not uploaded."
     is DivisionResultSubmissionResult.Rejected -> {
         val response = result.response
         val explanation = when (response.reason) {
             "duplicate-group-result" ->
-                "This division already has an accepted result on the server. " +
-                    "Ask the head table to review it; completing again will not replace that result."
+                "The server already has an accepted result for this division. " +
+                    "The tablet's saved packet remains available for review."
             "ring-group-mismatch" ->
                 "This division does not match the server's active division for this ring. " +
                     "Ask the head table to check the ring assignment."
@@ -522,7 +534,13 @@ suspend fun submitDivisionResult(
                         statusCode = responseCode,
                         errors = errors,
                         rawBody = responseBody,
-                        reason = root?.optString("reason").orEmpty()
+                    reason = root?.optString("reason").orEmpty(),
+                    duplicateGroupId = root?.optJSONObject("details")
+                        ?.optString("duplicateGroupId").orEmpty(),
+                    existingServerRecordId = root?.optJSONObject("details")
+                        ?.optString("existingServerRecordId").orEmpty(),
+                    existingReceivedAt = root?.optJSONObject("details")
+                        ?.optString("existingReceivedAt").orEmpty()
                     )
                 )
             }

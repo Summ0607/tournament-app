@@ -278,6 +278,9 @@ class DivisionStoreTest {
         store.markSubmitted("20", "submission-uuid")
         assertEquals(DivisionRecordStatus.SUBMITTED, store.record("20")?.status)
         assertEquals("submission-uuid", store.record("20")?.submissionId)
+        store.markAlreadyReceived("20", "duplicate-submission-uuid")
+        assertEquals(DivisionRecordStatus.ALREADY_RECEIVED, store.record("20")?.status)
+        assertEquals("duplicate-submission-uuid", store.record("20")?.submissionId)
     }
 
     @Test
@@ -318,6 +321,37 @@ class DivisionStoreTest {
     }
 
     @Test
+    fun ringPhaseServiceSummaryShowsSavedDivisionsAndTransferableEntries() {
+        val store = DivisionStore(folder.root)
+        store.saveDivision(sampleGroup(20), "qr")
+        store.saveDivision(sampleGroup(21), "qr")
+        store.saveDivision(sampleGroup(22), "qr")
+        store.saveService(
+            "20",
+            serializeRingPhaseService(
+                RingPhaseService("ring-a-1", "P1", "20")
+                    .seat(ServiceRole.CENTER, ServiceJudge("D10000", "Center Judge", "D3"), at = "t1")
+            )
+        )
+        store.saveService("21", serializeRingPhaseService(RingPhaseService("ring-a-1", "P1", "21")))
+        store.saveService(
+            "21",
+            serializeRingPhaseService(
+                RingPhaseService("ring-a-1", "P2", "21")
+                    .seat(ServiceRole.CORNER, ServiceJudge("D20000", "Corner Judge", "D2"), at = "t2")
+            )
+        )
+        store.saveService("22", serializeRingPhaseService(RingPhaseService("ring-b-1", "P1", "22")))
+
+        val summary = DivisionStore(folder.root).summarizeRingPhaseService("ring-a-1", "P1")
+        assertEquals(listOf("20", "21"), summary.map { it.groupAnchor })
+        assertEquals(listOf(1, 0), summary.map { it.seatedJudgeCount })
+        assertEquals(listOf(true, false), summary.map { it.hasTransferableService })
+        assertEquals(listOf("21"), store.summarizeRingPhaseService("ring-a-1", "P2").map { it.groupAnchor })
+        assertEquals(listOf("22"), store.summarizeRingPhaseService("ring-b-1", "P1").map { it.groupAnchor })
+    }
+
+    @Test
     fun ringPhaseServicePacketIsDurableAndReusesItsReceiptIdentity() {
         val store = DivisionStore(folder.root)
         store.saveDivision(sampleGroup(20), "qr")
@@ -333,7 +367,7 @@ class DivisionStoreTest {
                 at = "t1"
             )
         val secondService = RingPhaseService("ring-a-1", "P1", "21")
-            .seat(ServiceRole.TIMEKEEPER, ServiceJudge("ID3", "Timekeeper", "D1"), at = "t2")
+            .seat(ServiceRole.SKTK, ServiceJudge("ID3", "SK/TK", "D1"), at = "t2")
         store.saveService("20", serializeRingPhaseService(firstService))
         store.saveService("21", serializeRingPhaseService(secondService))
 

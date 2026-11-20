@@ -3,31 +3,34 @@ package com.summ0.tournamentscoringapp.engine
 import org.json.JSONArray
 import org.json.JSONObject
 import java.time.Instant
+import java.util.Locale
 import java.util.UUID
 
-/** Positions a judge can serve at a ring, matching the server's assignment roles. */
+/** Service roles recorded by the tablet; SK/TK is a shared team role. */
 enum class ServiceRole(val wire: String) {
     CENTER("center"),
     CORNER("corner"),
-    SCOREKEEPER("scorekeeper"),
-    TIMEKEEPER("timekeeper"),
     SKTK("sktk"),
     ARBITRATOR("arbitrator");
 
-    val selectable: Boolean get() = this != SKTK
+    val selectable: Boolean get() = true
 
     val label: String
         get() = when (this) {
             CENTER -> "Center"
             CORNER -> "Corner"
-            SCOREKEEPER -> "Scorekeeper"
-            TIMEKEEPER -> "Timekeeper"
-            SKTK -> "SK/TK (legacy)"
+            SKTK -> "SK/TK"
             ARBITRATOR -> "Arbitrator"
         }
 
     companion object {
-        fun fromWire(value: String): ServiceRole? = entries.firstOrNull { it.wire == value }
+        fun fromWire(value: String): ServiceRole? {
+            val normalized = value.trim().lowercase(Locale.ROOT)
+            return when (normalized) {
+                "scorekeeper", "timekeeper", "sktk" -> SKTK
+                else -> entries.firstOrNull { it.wire == normalized }
+            }
+        }
     }
 }
 
@@ -233,7 +236,14 @@ fun parseRingPhaseService(root: JSONObject): RingPhaseService {
                 }
 
             }
-            if (judges.isNotEmpty()) seats[role] = judges
+            if (judges.isNotEmpty()) {
+                val combined = seats[role].orEmpty() + judges
+                val seen = mutableSetOf<String>()
+                seats[role] = combined.filter { judge ->
+                    val associationId = judge.associationId.trim().uppercase(Locale.ROOT)
+                    associationId.isBlank() || seen.add(associationId)
+                }
+            }
         }
     }
     val history = mutableListOf<ServiceHistoryEntry>()

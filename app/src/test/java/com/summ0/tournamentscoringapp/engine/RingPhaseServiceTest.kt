@@ -1,6 +1,8 @@
 package com.summ0.tournamentscoringapp.engine
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -124,11 +126,42 @@ class RingPhaseServiceTest {
     }
 
     @Test
+    fun scorekeeperAndTimekeeperAssignmentsShareOneSktkServiceRole() {
+        val scorekeeper = ServiceJudge("TSD-204", "Scorekeeper", "D2")
+        val timekeeper = ServiceJudge("TSD-205", "Timekeeper", "D3")
+        val service = base()
+            .withJudgePresence(
+                JudgeAttendanceEntry(
+                    scorekeeper.associationId,
+                    scorekeeper.name,
+                    "scorekeeper",
+                    rank = scorekeeper.rank
+                ),
+                present = true,
+                at = "t0"
+            )
+            .withJudgePresence(
+                JudgeAttendanceEntry(
+                    timekeeper.associationId,
+                    timekeeper.name,
+                    "timekeeper",
+                    rank = timekeeper.rank
+                ),
+                present = true,
+                at = "t1"
+            )
+
+        assertEquals(listOf(scorekeeper, timekeeper), service.seats[ServiceRole.SKTK])
+        assertEquals(ServiceRole.SKTK, service.history.first().role)
+        assertEquals(ServiceRole.SKTK, service.history.last().role)
+    }
+
+    @Test
     fun serviceRoundTripsLosslessly() {
         val service = base()
             .seat(ServiceRole.CENTER, center, at = "t0")
             .seat(ServiceRole.CORNER, corner1, at = "t1")
-            .seat(ServiceRole.SCOREKEEPER, corner2, at = "t2")
+            .seat(ServiceRole.SKTK, corner2, at = "t2")
             .replace(
                 ServiceRole.CORNER,
                 "TSD-201",
@@ -155,7 +188,7 @@ class RingPhaseServiceTest {
                 at = "t1"
             )
         val second = base().copy(groupAnchor = "21")
-            .seat(ServiceRole.TIMEKEEPER, corner1, at = "t2")
+            .seat(ServiceRole.SKTK, corner1, at = "t2")
         val packet = buildRingPhaseServicePacket(
             ringId = "ring-a-1",
             phase = "P1",
@@ -168,8 +201,50 @@ class RingPhaseServiceTest {
             .map { packet.getJSONArray("divisions").getJSONObject(it).getString("groupAnchor") })
         assertEquals(2, packet.getJSONArray("divisions").getJSONObject(0).getJSONArray("history").length())
         assertEquals(corner1.associationId, packet.getJSONArray("divisions").getJSONObject(1)
-            .getJSONObject("seats").getJSONArray("timekeeper").getJSONObject(0).getString("associationId")
+            .getJSONObject("seats").getJSONArray("sktk").getJSONObject(0).getString("associationId")
         )
+    }
+
+    @Test
+    fun legacyScorekeeperAndTimekeeperRecordsMergeIntoSktk() {
+        val first = JSONObject()
+            .put("associationId", "TSD-204")
+            .put("name", "Scorekeeper")
+            .put("rank", "D2")
+        val second = JSONObject()
+            .put("associationId", "TSD-205")
+            .put("name", "Timekeeper")
+            .put("rank", "D3")
+        val legacy = JSONObject()
+            .put("ringId", "ring-a-1")
+            .put("phase", "P1")
+            .put("groupAnchor", "20")
+            .put(
+                "seats",
+                JSONObject()
+                    .put("scorekeeper", org.json.JSONArray().put(first))
+                    .put("timekeeper", org.json.JSONArray().put(first).put(second))
+            )
+            .put(
+                "history",
+                org.json.JSONArray()
+                    .put(JSONObject().put("action", "SEATED").put("role", "scorekeeper")
+                        .put("judgeAssociationId", "TSD-204"))
+                    .put(JSONObject().put("action", "SEATED").put("role", "timekeeper")
+                        .put("judgeAssociationId", "TSD-205"))
+            )
+
+        val parsed = parseRingPhaseService(legacy)
+        assertEquals(listOf(
+            ServiceJudge("TSD-204", "Scorekeeper", "D2"),
+            ServiceJudge("TSD-205", "Timekeeper", "D3")
+        ), parsed.seats[ServiceRole.SKTK])
+        assertTrue(parsed.history.all { it.role == ServiceRole.SKTK })
+
+        val serialized = serializeRingPhaseService(parsed).getJSONObject("seats")
+        assertEquals(2, serialized.getJSONArray("sktk").length())
+        assertFalse(serialized.has("scorekeeper"))
+        assertFalse(serialized.has("timekeeper"))
     }
 
     @Test

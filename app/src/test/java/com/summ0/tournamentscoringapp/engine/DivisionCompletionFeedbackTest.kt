@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -14,7 +15,7 @@ class DivisionCompletionFeedbackTest {
         server.createContext("/api/rings/ring-a-1/complete") { exchange ->
             exchange.requestBody.use { it.readBytes() }
             val response = """
-                {"reason":"duplicate-group-result","message":"Group already has an accepted result: 28"}
+                {"reason":"duplicate-group-result","message":"Group already has an accepted result: 28","details":{"duplicateGroupId":"28","existingServerRecordId":"record-28","existingReceivedAt":"2026-11-19T12:00:00Z"}}
             """.trimIndent().toByteArray()
             exchange.sendResponseHeaders(409, response.size.toLong())
             exchange.responseBody.use { it.write(response) }
@@ -24,14 +25,33 @@ class DivisionCompletionFeedbackTest {
             val result = submitDivisionResult(
                 "http://127.0.0.1:${server.address.port}", "ring-a-1", JSONObject()
             )
+            val rejected = result as DivisionResultSubmissionResult.Rejected
+            assertEquals("28", rejected.response.duplicateGroupId)
+            assertEquals("record-28", rejected.response.existingServerRecordId)
+            assertEquals("2026-11-19T12:00:00Z", rejected.response.existingReceivedAt)
             val feedback = divisionSubmissionFeedback(result)
             assertTrue(feedback.contains("HTTP 409"))
             assertTrue(feedback.contains("already has an accepted result"))
-            assertTrue(feedback.contains("head table"))
+            assertTrue(feedback.contains("saved packet remains available for review"))
             assertTrue(feedback.contains("remain saved on this tablet"))
             assertTrue(feedback.contains("not marked submitted"))
         } finally {
             server.stop(0)
+        }
+
+        @Test
+        fun alreadyReceivedFeedbackDoesNotClaimTheTabletPacketWasUploaded() {
+            val feedback = divisionSubmissionFeedback(
+                DivisionResultSubmissionResult.AlreadyReceived(
+                    submissionId = "local-submission",
+                    groupId = "28",
+                    serverRecordId = "record-28",
+                    receivedAt = "2026-11-19T12:00:00Z"
+                )
+            )
+            assertTrue(feedback.contains("already has a result"))
+            assertTrue(feedback.contains("record-28"))
+            assertTrue(feedback.contains("retained and was not uploaded"))
         }
     }
 

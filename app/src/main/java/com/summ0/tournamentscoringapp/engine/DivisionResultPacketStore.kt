@@ -75,6 +75,11 @@ class DivisionResultPacketStore(private val baseDir: File) {
         return if (file.isFile) JSONObject(file.readText()) else null
     }
 
+    fun loadSentResponse(submissionId: String): JSONObject? {
+        val file = File(File(sentDir, submissionId), "response.json")
+        return if (file.isFile) JSONObject(file.readText()) else null
+    }
+
     fun listSentPackets(): List<JSONObject> {
         sentDir.mkdirs()
         return sentDir.listFiles()
@@ -86,6 +91,16 @@ class DivisionResultPacketStore(private val baseDir: File) {
     }
 
     fun markSent(packetFile: File, serverResponse: JSONObject): File {
+        val sanitizedResponse = JSONObject(serverResponse.toString()).apply {
+            remove("status")
+        }
+        return moveToSent(packetFile, sanitizedResponse)
+    }
+
+    fun markAlreadyReceived(packetFile: File, serverResponse: JSONObject): File =
+        moveToSent(packetFile, JSONObject(serverResponse.toString()))
+
+    private fun moveToSent(packetFile: File, serverResponse: JSONObject): File {
         val submissionId = submissionIdFromPacketFile(packetFile)
         val sentPacketDir = File(sentDir, submissionId)
         sentPacketDir.mkdirs()
@@ -93,12 +108,9 @@ class DivisionResultPacketStore(private val baseDir: File) {
         val sentPacketFile = File(sentPacketDir, "packet.json")
         val sentResponseFile = File(sentPacketDir, "response.json")
         val sentMetadataFile = File(sentPacketDir, "metadata.json")
-        val sanitizedResponse = JSONObject(serverResponse.toString()).apply {
-            remove("status")
-        }
 
         packetFile.copyTo(sentPacketFile, overwrite = true)
-        sanitizedResponse.toString(2).let(sentResponseFile::writeText)
+        serverResponse.toString(2).let(sentResponseFile::writeText)
         if (metadataFile(submissionId).exists()) {
             metadataFile(submissionId).copyTo(sentMetadataFile, overwrite = true)
         }
