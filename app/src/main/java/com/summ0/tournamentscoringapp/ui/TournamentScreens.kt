@@ -1315,6 +1315,58 @@ internal fun CheckInScreen(
         }
     }
 
+    fun saveAndCheckServerConfiguration() {
+        val mode = parseServerConnectionMode(serverConnectionModeName)
+        val configuredServer = mainViewModel.resolveServerBaseUrl(mode, serverAddressForCurrentMode)
+        if (configuredServer == null) {
+            launchServerStatus = "Unable to connect. Enter a valid IPv4 server address."
+            return
+        }
+
+        mainViewModel.saveServerConnectionConfig(
+            ServerConnectionConfig(
+                mode = mode,
+                lastDnsName = lastDnsName,
+                lastServerAddress = lastServerAddress
+            )
+        )
+        val pairedServer = TabletAuthorization.server()
+        screenScope.launch {
+            isCheckingLaunchServer = true
+            launchServerStatus = "Checking HTTPS server..."
+            try {
+                val result = checkServerVersion(configuredServer)
+                if (pairedServer == null) {
+                    serverBaseUrl = configuredServer
+                    checkedUpdateServer = configuredServer
+                    launchServerReachable = false
+                }
+                if (result.errorMessage != null || result.versionCode == null) {
+                    launchServerStatus =
+                        "Unable to connect. ${result.errorMessage ?: "The server returned an invalid app version."}"
+                    return@launch
+                }
+
+                val serverVersion = result.versionName ?: "code ${result.versionCode}"
+                launchServerStatus = when {
+                    pairedServer == null ->
+                        "HTTPS verified (server $serverVersion). Scan today's ring QR code to authorize and connect."
+                    pairedServer == configuredServer ->
+                        "HTTPS verified (server $serverVersion). Existing ring authorization remains active."
+                    else ->
+                        "HTTPS verified (server $serverVersion). Existing ring authorization is unchanged; scan this server's QR code to switch."
+                }
+                if (pairedServer == null && result.versionCode > BuildConfig.VERSION_CODE) {
+                    updateServerBaseUrl = configuredServer
+                    showUpdateDialog = true
+                    showServerConfigDialog = false
+                }
+            } finally {
+                isCheckingLaunchServer = false
+            }
+        }
+    }
+
     fun applyRingContactResult(result: JsonFetchResult) {
         if (result.root != null) {
             markRingConnectionHealthy()
@@ -2458,10 +2510,7 @@ internal fun CheckInScreen(
             },
             status = launchServerStatus,
             isLoading = isCheckingLaunchServer,
-            onRetry = {
-                showServerConfigDialog = false
-                refreshLaunchRingOptions()
-            },
+            onRetry = ::saveAndCheckServerConfiguration,
             onDismiss = { showServerConfigDialog = false }
         )
     }

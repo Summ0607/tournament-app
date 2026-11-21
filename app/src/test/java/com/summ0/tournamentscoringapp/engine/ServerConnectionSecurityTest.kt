@@ -43,6 +43,10 @@ class ServerConnectionSecurityTest {
             buildServerBaseUrl(ServerConnectionMode.IP, "192.168.4.42")
         )
         assertEquals(
+            "https://10.90.111.23:3443",
+            buildServerBaseUrl(ServerConnectionMode.IP, "10.90.111.23")
+        )
+        assertEquals(
             "https://192.168.4.42:3443",
             buildServerBaseUrl(ServerConnectionMode.IP, "http://192.168.4.42:3000")
         )
@@ -83,5 +87,24 @@ class ServerConnectionSecurityTest {
         assertTrue(message.contains("TLS certificate validation failed"))
         assertTrue(message.contains("tourn-svr.home.arpa"))
         assertTrue(message.contains("Do not switch to HTTP"))
+    }
+
+    @Test
+    fun serverVersionCheckReturnsHttpFailuresForConnectionStatus() = runBlocking {
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/api/version") { exchange ->
+            val response = "temporarily unavailable".toByteArray()
+            exchange.sendResponseHeaders(503, response.size.toLong())
+            exchange.responseBody.use { it.write(response) }
+        }
+        server.start()
+        try {
+            val result = checkServerVersion("http://127.0.0.1:${server.address.port}/")
+
+            assertNull(result.versionCode)
+            assertTrue(result.errorMessage.orEmpty().contains("HTTP 503"))
+        } finally {
+            server.stop(0)
+        }
     }
 }

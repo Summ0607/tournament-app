@@ -2,14 +2,18 @@
 
 ## HTTPS server connection
 
-The app's default connection is `https://tourn-svr.home.arpa:3443`. The alternative
-manual-IP mode uses `https://192.168.4.42:3443`. Both host identities are present
-in the server certificate. The app includes the authorized **public** Tournament
-Root CA, scoped to these two exact hostnames by Android Network Security Config.
+The app's default connection is `https://tourn-svr.home.arpa:3443`. Manual-IP mode
+supports `https://192.168.4.42:3443` and the current RNDIS test address
+`https://10.90.111.23:3443`. These exact host identities are present in the server
+certificate. The app includes the authorized **public** Tournament Root CA,
+scoped to these exact identities by Android Network Security Config.
 It does not install a CA into Android's device-wide trust store. Cleartext HTTP
 is disabled, certificate and hostname verification remain enabled, and there is
 no HTTP retry or trust bypass. Existing saved `HomePC-Sum2` default DNS settings
 are migrated to `tourn-svr.home.arpa`; other saved DNS/IP choices are preserved.
+Server Configuration's **Save & Retry** saves the selected DNS/IP and checks
+`/api/version` over HTTPS without ring credentials. A successful check verifies
+network and TLS only; ring authorization still requires today's QR code.
 
 The app also checks for updates and downloads APKs from this same configured
 HTTPS base URL, so health checks, ring operations, result submissions, and APK
@@ -25,7 +29,7 @@ From `C:\Karate4\tournament-app`, run:
 
 The debug APK is written to
 `C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk`.
-This checkpoint is version **1.59 (60)**. The installed version is always shown
+This checkpoint is version **1.78 (79)**. The installed version is always shown
 in a small bottom-right footer on the main screens, including startup, waiting,
 check-in, scoring and results. The footer stays outside scrolling content and
 clear of Android navigation controls. Server Configuration also shows the version,
@@ -53,7 +57,7 @@ private key or account database. The bundled PEM file's SHA-256 file hash is
    `HTTP/1.1 200 OK`. Do not add options that bypass verification.
 3. Transfer the debug APK to the tablet over an approved method. If Android
    prompts, allow the file manager/installer to install this local app, then
-   install **TournamentScoringApp 1.59 (60)**. For example, with USB debugging:
+   install **TournamentScoringApp 1.78 (79)**. For example, with USB debugging:
 
    ```powershell
    adb install -r C:\Karate4\tournament-app\app\build\outputs\apk\debug\app-debug.apk

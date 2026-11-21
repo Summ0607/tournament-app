@@ -332,6 +332,12 @@ data class HttpProbeResult(
     val errorMessage: String? = null
 )
 
+data class ServerVersionCheckResult(
+    val versionCode: Int? = null,
+    val versionName: String? = null,
+    val errorMessage: String? = null
+)
+
 enum class ServerConnectionMode {
     DNS,
     IP

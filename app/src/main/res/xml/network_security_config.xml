@@ -3,6 +3,7 @@
     <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="false">tourn-svr.home.arpa</domain>
         <domain includeSubdomains="false">192.168.4.42</domain>
+        <domain includeSubdomains="false">10.90.111.23</domain>
         <trust-anchors>
             <certificates src="@raw/tournament_root_ca" />
         </trust-anchors>
